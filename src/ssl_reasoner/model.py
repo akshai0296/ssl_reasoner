@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -132,33 +134,141 @@ class MathJEPAReadout(nn.Module):
         super().__init__()
         self.problem_encoder = MeanPoolEncoder(vocab_size, d_model, max_problem_len)
         self.target_encoder = SlotTargetEncoder(vocab_size, d_model, max_answer_len, num_slots)
+        self.target_encoder_ema = copy.deepcopy(self.target_encoder)
+        for param in self.target_encoder_ema.parameters():
+            param.requires_grad = False
         self.predictor = SequencePredictor(d_model, num_slots)
         self.readout = ParallelReadoutDecoder(d_model, vocab_size, max_answer_len)
 
-    def forward(self, problem_ids: torch.Tensor, answer_ids: torch.Tensor, answer_len: torch.Tensor):
-        context = self.problem_encoder(problem_ids)
-        with torch.no_grad():
-            target_slots = self.target_encoder(answer_ids)
-        pred_slots = self.predictor(context)
-        readout = self.readout(pred_slots)
-        pred_loss = F.smooth_l1_loss(pred_slots, target_slots)
+    @torch.no_grad()
+    def ema_update_target_encoder(self, decay: float = 0.996) -> None:
+        for ema_param, param in zip(
+            self.target_encoder_ema.parameters(), self.target_encoder.parameters()
+        ):
+            ema_param.data.mul_(decay).add_(param.data, alpha=1.0 - decay)
+
+    def encode_context(self, problem_ids: torch.Tensor) -> torch.Tensor:
+        return self.problem_encoder(problem_ids)
+
+    def encode_target(self, answer_ids: torch.Tensor, use_ema: bool = True) -> torch.Tensor:
+        encoder = self.target_encoder_ema if use_ema else self.target_encoder
+        return encoder(answer_ids)
+
+    def predict_slots(self, problem_ids: torch.Tensor) -> torch.Tensor:
+        return self.predictor(self.encode_context(problem_ids))
+
+    def readout_loss(
+        self,
+        slots: torch.Tensor,
+        answer_ids: torch.Tensor,
+        answer_len: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        readout = self.readout(slots)
         token_loss = F.cross_entropy(
             readout["token_logits"].transpose(1, 2),
             answer_ids,
             ignore_index=0,
         )
-        length_loss = F.cross_entropy(readout["length_logits"], answer_len.clamp(max=answer_ids.size(1) - 1))
-        total_loss = pred_loss + token_loss + 0.1 * length_loss
+        length_loss = F.cross_entropy(
+            readout["length_logits"], answer_len.clamp(max=answer_ids.size(1) - 1)
+        )
         return {
-            "loss": total_loss,
-            "pred_loss": pred_loss,
+            "loss": token_loss + 0.1 * length_loss,
             "token_loss": token_loss,
             "length_loss": length_loss,
-            "pred_slots": pred_slots,
+        }
+
+    @staticmethod
+    def info_nce_loss(pred_slots: torch.Tensor, target_slots: torch.Tensor, temp: float = 0.07):
+        pred = F.normalize(pred_slots.mean(dim=1), dim=-1)
+        target = F.normalize(target_slots.mean(dim=1), dim=-1)
+        logits = pred @ target.T / temp
+        labels = torch.arange(logits.size(0), device=logits.device)
+        return (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)) / 2
+
+    @staticmethod
+    def vicreg_loss(slots: torch.Tensor, eps: float = 1e-4) -> torch.Tensor:
+        x = slots.flatten(0, 1)
+        x = x - x.mean(dim=0)
+        std = torch.sqrt(x.var(dim=0) + eps)
+        var_loss = torch.mean(F.relu(1.0 - std))
+        cov = (x.T @ x) / max(x.size(0) - 1, 1)
+        off_diag = cov - torch.diag(torch.diag(cov))
+        cov_loss = off_diag.pow(2).sum() / x.size(1)
+        return var_loss + cov_loss
+
+    def stage0_target_autoencode(
+        self,
+        answer_ids: torch.Tensor,
+        answer_len: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        target_slots = self.encode_target(answer_ids, use_ema=False)
+        out = self.readout_loss(target_slots, answer_ids, answer_len)
+        return {
+            "loss": out["loss"],
+            "token_loss": out["token_loss"],
+            "length_loss": out["length_loss"],
+            "target_slots": target_slots.detach(),
+        }
+
+    def stage1_predictor(
+        self,
+        problem_ids: torch.Tensor,
+        answer_ids: torch.Tensor,
+        contrastive_weight: float = 0.1,
+        vicreg_weight: float = 0.05,
+    ) -> dict[str, torch.Tensor]:
+        pred_slots = self.predict_slots(problem_ids)
+        with torch.no_grad():
+            target_slots = self.encode_target(answer_ids, use_ema=True)
+        pred_loss = F.smooth_l1_loss(pred_slots, target_slots)
+        contrastive_loss = self.info_nce_loss(pred_slots, target_slots)
+        vicreg = self.vicreg_loss(pred_slots)
+        loss = pred_loss + contrastive_weight * contrastive_loss + vicreg_weight * vicreg
+        return {
+            "loss": loss,
+            "pred_loss": pred_loss,
+            "contrastive_loss": contrastive_loss,
+            "vicreg_loss": vicreg,
+            "pred_slots": pred_slots.detach(),
+            "target_slots": target_slots.detach(),
+        }
+
+    def stage2_readout(
+        self,
+        problem_ids: torch.Tensor,
+        answer_ids: torch.Tensor,
+        answer_len: torch.Tensor,
+        true_latent_ratio: float = 0.5,
+    ) -> dict[str, torch.Tensor]:
+        with torch.no_grad():
+            pred_slots = self.predict_slots(problem_ids)
+            true_slots = self.encode_target(answer_ids, use_ema=True)
+            use_true = torch.rand((), device=problem_ids.device).item() < true_latent_ratio
+            slots = true_slots if use_true else pred_slots
+        out = self.readout_loss(slots, answer_ids, answer_len)
+        return {
+            "loss": out["loss"],
+            "token_loss": out["token_loss"],
+            "length_loss": out["length_loss"],
+            "used_true_latent": torch.tensor(float(use_true), device=problem_ids.device),
+        }
+
+    def forward(self, problem_ids: torch.Tensor, answer_ids: torch.Tensor, answer_len: torch.Tensor):
+        pred_out = self.stage1_predictor(problem_ids, answer_ids)
+        dec_out = self.readout_loss(pred_out["pred_slots"], answer_ids, answer_len)
+        total_loss = pred_out["loss"] + dec_out["loss"]
+        return {
+            "loss": total_loss,
+            "pred_loss": pred_out["pred_loss"],
+            "contrastive_loss": pred_out["contrastive_loss"],
+            "vicreg_loss": pred_out["vicreg_loss"],
+            "token_loss": dec_out["token_loss"],
+            "length_loss": dec_out["length_loss"],
+            "pred_slots": pred_out["pred_slots"],
         }
 
     @torch.no_grad()
     def solve_ids(self, problem_ids: torch.Tensor, pad_id: int) -> list[list[int]]:
-        context = self.problem_encoder(problem_ids)
-        slots = self.predictor(context)
+        slots = self.predict_slots(problem_ids)
         return self.readout.decode_ids(slots, pad_id=pad_id)

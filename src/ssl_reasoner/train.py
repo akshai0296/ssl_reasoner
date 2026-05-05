@@ -21,6 +21,17 @@ def _device(name: str) -> torch.device:
     return torch.device("cpu")
 
 
+def _set_trainable(module: torch.nn.Module, trainable: bool) -> None:
+    for param in module.parameters():
+        param.requires_grad = trainable
+
+
+@torch.no_grad()
+def predict_batch(model, batch, tokenizer, device) -> list[str]:
+    decoded_ids = model.solve_ids(batch["problem_ids"].to(device), pad_id=tokenizer.pad_id)
+    return [tokenizer.decode(ids).strip() for ids in decoded_ids]
+
+
 @torch.no_grad()
 def evaluate(model, dataset, tokenizer, device, batch_size: int) -> float:
     model.eval()
@@ -28,18 +39,119 @@ def evaluate(model, dataset, tokenizer, device, batch_size: int) -> float:
     correct = 0
     total = 0
     for batch in loader:
-        problem_ids = batch["problem_ids"].to(device)
-        decoded_ids = model.solve_ids(problem_ids, pad_id=tokenizer.pad_id)
-        predictions = [tokenizer.decode(ids).strip() for ids in decoded_ids]
+        predictions = predict_batch(model, batch, tokenizer, device)
         for pred, answer in zip(predictions, batch["answer"]):
             correct += pred == answer
             total += 1
     return correct / max(total, 1)
 
 
+@torch.no_grad()
+def format_samples(model, dataset, tokenizer, device, count: int = 5) -> list[str]:
+    model.eval()
+    subset = [dataset[i] for i in range(min(count, len(dataset)))]
+    batch = {
+        "problem_ids": torch.stack([item["problem_ids"] for item in subset]),
+        "answer": [item["answer"] for item in subset],
+        "problem": [item["problem"] for item in subset],
+    }
+    predictions = predict_batch(model, batch, tokenizer, device)
+    rows = []
+    for problem, pred, answer in zip(batch["problem"], predictions, batch["answer"]):
+        mark = "ok" if pred == answer else "bad"
+        rows.append(f"  {mark}: {problem} -> pred={pred!r} target={answer!r}")
+    return rows
+
+
+def save_checkpoint(model, args, tokenizer, output_dir: Path, best_acc: float) -> None:
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "args": vars(args),
+            "vocab_chars": tokenizer.chars,
+            "best_acc": best_acc,
+        },
+        output_dir / "best.pt",
+    )
+
+
+def run_stage(
+    *,
+    name: str,
+    model: MathJEPAReadout,
+    loader: DataLoader,
+    val_dataset: MathDataset,
+    tokenizer,
+    device: torch.device,
+    optimizer: torch.optim.Optimizer,
+    steps: int,
+    batch_size: int,
+    eval_every: int,
+    sample_count: int,
+    output_dir: Path,
+    args,
+    best_acc: float,
+) -> float:
+    step = 0
+    print(f"=== {name} ({steps} steps) ===")
+    while step < steps:
+        for batch in loader:
+            model.train()
+            optimizer.zero_grad(set_to_none=True)
+            problem_ids = batch["problem_ids"].to(device)
+            answer_ids = batch["answer_ids"].to(device)
+            answer_len = batch["answer_len"].to(device)
+
+            if name == "stage0_target_warmup":
+                out = model.stage0_target_autoencode(answer_ids, answer_len)
+            elif name == "stage1_predictor":
+                out = model.stage1_predictor(
+                    problem_ids,
+                    answer_ids,
+                    contrastive_weight=args.contrastive_weight,
+                    vicreg_weight=args.vicreg_weight,
+                )
+            elif name == "stage2_readout":
+                progress = step / max(steps - 1, 1)
+                true_ratio = max(0.0, args.true_latent_ratio * (1.0 - progress))
+                out = model.stage2_readout(problem_ids, answer_ids, answer_len, true_ratio)
+            else:
+                raise ValueError(f"Unknown stage: {name}")
+
+            out["loss"].backward()
+            torch.nn.utils.clip_grad_norm_(
+                [p for p in model.parameters() if p.requires_grad], args.grad_clip
+            )
+            optimizer.step()
+
+            if name == "stage0_target_warmup":
+                model.ema_update_target_encoder(args.ema_decay)
+
+            step += 1
+            if step == 1 or step % eval_every == 0 or step == steps:
+                acc = evaluate(model, val_dataset, tokenizer, device, batch_size)
+                metrics = " ".join(
+                    f"{key}={value.item():.4f}"
+                    for key, value in out.items()
+                    if key.endswith("loss")
+                )
+                print(f"{name} step={step} {metrics} val_exact={acc:.3f}")
+                for row in format_samples(model, val_dataset, tokenizer, device, sample_count):
+                    print(row)
+                if acc > best_acc:
+                    best_acc = acc
+                    save_checkpoint(model, args, tokenizer, output_dir, best_acc)
+            if step >= steps:
+                break
+    return best_acc
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--steps", type=int, default=1000)
+    parser.add_argument("--steps", type=int, default=None, help="Total steps split 20/50/30.")
+    parser.add_argument("--stage0-steps", type=int, default=None)
+    parser.add_argument("--stage1-steps", type=int, default=None)
+    parser.add_argument("--stage2-steps", type=int, default=None)
     parser.add_argument("--train-size", type=int, default=5000)
     parser.add_argument("--val-size", type=int, default=500)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -51,17 +163,37 @@ def main() -> None:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--output-dir", default="checkpoints")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--overfit", action="store_true")
+    parser.add_argument("--eval-every", type=int, default=50)
+    parser.add_argument("--sample-count", type=int, default=5)
+    parser.add_argument("--contrastive-weight", type=float, default=0.1)
+    parser.add_argument("--vicreg-weight", type=float, default=0.05)
+    parser.add_argument("--ema-decay", type=float, default=0.996)
+    parser.add_argument("--true-latent-ratio", type=float, default=1.0)
+    parser.add_argument(
+        "--stages",
+        default="0,1,2",
+        help="Comma-separated stage ids to run. Use 0,1,2 for the plan pipeline.",
+    )
+    parser.add_argument("--grad-clip", type=float, default=1.0)
     args = parser.parse_args()
+
+    if args.steps is not None:
+        args.stage0_steps = args.stage0_steps or max(1, int(args.steps * 0.2))
+        args.stage1_steps = args.stage1_steps or max(1, int(args.steps * 0.5))
+        args.stage2_steps = args.stage2_steps or max(1, args.steps - args.stage0_steps - args.stage1_steps)
+    else:
+        args.stage0_steps = args.stage0_steps or 200
+        args.stage1_steps = args.stage1_steps or 500
+        args.stage2_steps = args.stage2_steps or 300
 
     torch.manual_seed(args.seed)
     device = _device(args.device)
     tokenizer = build_math_tokenizer()
 
     train_examples = generate_math_examples(args.train_size, seed=args.seed)
-    val_examples = generate_math_examples(args.val_size, seed=args.seed + 1)
-    train_dataset = MathDataset(
-        train_examples, tokenizer, args.max_problem_len, args.max_answer_len
-    )
+    val_examples = train_examples if args.overfit else generate_math_examples(args.val_size, seed=args.seed + 1)
+    train_dataset = MathDataset(train_examples, tokenizer, args.max_problem_len, args.max_answer_len)
     val_dataset = MathDataset(val_examples, tokenizer, args.max_problem_len, args.max_answer_len)
     loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
 
@@ -72,48 +204,90 @@ def main() -> None:
         d_model=args.d_model,
         num_slots=args.num_slots,
     ).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     best_acc = -1.0
-    step = 0
+    requested_stages = {stage.strip() for stage in args.stages.split(",") if stage.strip()}
 
-    while step < args.steps:
-        for batch in loader:
-            model.train()
-            optimizer.zero_grad(set_to_none=True)
-            out = model(
-                batch["problem_ids"].to(device),
-                batch["answer_ids"].to(device),
-                batch["answer_len"].to(device),
-            )
-            out["loss"].backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            optimizer.step()
+    if "0" in requested_stages:
+        _set_trainable(model.problem_encoder, False)
+        _set_trainable(model.predictor, False)
+        _set_trainable(model.target_encoder, True)
+        _set_trainable(model.readout, True)
+        optimizer = torch.optim.AdamW(
+            list(model.target_encoder.parameters()) + list(model.readout.parameters()),
+            lr=args.lr,
+            weight_decay=0.01,
+        )
+        best_acc = run_stage(
+            name="stage0_target_warmup",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.stage0_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
 
-            step += 1
-            if step == 1 or step % 50 == 0 or step == args.steps:
-                acc = evaluate(model, val_dataset, tokenizer, device, args.batch_size)
-                print(
-                    f"step={step} loss={out['loss'].item():.4f} "
-                    f"pred={out['pred_loss'].item():.4f} token={out['token_loss'].item():.4f} "
-                    f"len={out['length_loss'].item():.4f} val_exact={acc:.3f}"
-                )
-                if acc > best_acc:
-                    best_acc = acc
-                    torch.save(
-                        {
-                            "model": model.state_dict(),
-                            "args": vars(args),
-                            "vocab_chars": tokenizer.chars,
-                            "best_acc": best_acc,
-                        },
-                        output_dir / "best.pt",
-                    )
-            if step >= args.steps:
-                break
+    if "1" in requested_stages:
+        _set_trainable(model.problem_encoder, True)
+        _set_trainable(model.predictor, True)
+        _set_trainable(model.target_encoder, False)
+        _set_trainable(model.readout, False)
+        optimizer = torch.optim.AdamW(
+            list(model.problem_encoder.parameters()) + list(model.predictor.parameters()),
+            lr=args.lr,
+            weight_decay=0.01,
+        )
+        best_acc = run_stage(
+            name="stage1_predictor",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.stage1_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
 
+    if "2" in requested_stages:
+        _set_trainable(model.problem_encoder, False)
+        _set_trainable(model.predictor, False)
+        _set_trainable(model.target_encoder, False)
+        _set_trainable(model.readout, True)
+        optimizer = torch.optim.AdamW(model.readout.parameters(), lr=args.lr, weight_decay=0.01)
+        best_acc = run_stage(
+            name="stage2_readout",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.stage2_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
+
+    save_checkpoint(model, args, tokenizer, output_dir, best_acc)
     print(f"done best_val_exact={best_acc:.3f} checkpoint={output_dir / 'best.pt'}")
 
 
