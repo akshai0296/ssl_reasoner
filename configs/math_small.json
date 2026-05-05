@@ -1,0 +1,11 @@
+{
+  "steps": 1000,
+  "train_size": 5000,
+  "val_size": 500,
+  "batch_size": 64,
+  "lr": 0.0003,
+  "d_model": 128,
+  "num_slots": 8,
+  "max_problem_len": 64,
+  "max_answer_len": 16
+}
