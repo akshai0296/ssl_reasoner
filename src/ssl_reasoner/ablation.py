@@ -6,7 +6,7 @@ import copy
 import torch
 from torch.utils.data import DataLoader
 
-from .data import MATH_FEATURE_VOCAB_SIZE, MathDataset, generate_math_examples
+from .data import CURRICULA, MATH_FEATURE_VOCAB_SIZE, MathDataset, generate_math_examples
 from .model import MathJEPAReadout, ParallelReadoutDecoder
 from .tokenizer import build_math_tokenizer
 
@@ -107,7 +107,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument(
         "--curriculum",
-        choices=["mixed", "single_op_balanced", "mixed_only"],
+        choices=CURRICULA,
         default="mixed",
     )
     args = parser.parse_args()

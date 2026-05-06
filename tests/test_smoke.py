@@ -1,3 +1,5 @@
+import re
+
 import torch
 
 from ssl_reasoner.data import (
@@ -78,6 +80,52 @@ def test_mixed_only_curriculum_uses_three_term_expressions():
     examples = generate_math_examples(6, seed=0, curriculum="mixed_only")
     assert {example.op_label for example in examples} == {"mixed"}
     assert {example.difficulty for example in examples} == {1}
+
+
+def test_compositional_single_splits_use_disjoint_operand_ranges():
+    seen = generate_math_examples(9, seed=0, curriculum="seen_single")
+    unseen = generate_math_examples(9, seed=0, curriculum="unseen_single")
+
+    assert {example.split_label for example in seen} == {"seen_single"}
+    assert {example.split_label for example in unseen} == {"unseen_single"}
+    assert [example.op_label for example in seen] == ["+", "-", "*"] * 3
+
+    for example in seen:
+        operands = [int(token) for token in re.findall(r"\d+", example.problem)]
+        limit = 10 if example.op_label == "*" else 50
+        assert all(0 <= operand <= limit for operand in operands)
+
+    for example in unseen:
+        operands = [int(token) for token in re.findall(r"\d+", example.problem)]
+        lower = 11 if example.op_label == "*" else 51
+        assert all(lower <= operand for operand in operands)
+
+
+def test_compositional_mixed_splits_use_disjoint_operand_ranges():
+    seen = generate_math_examples(8, seed=1, curriculum="seen_mixed")
+    unseen = generate_math_examples(8, seed=1, curriculum="unseen_mixed")
+
+    assert {example.split_label for example in seen} == {"seen_mixed"}
+    assert {example.split_label for example in unseen} == {"unseen_mixed"}
+    assert {example.op_label for example in seen + unseen} == {"mixed"}
+    assert {example.difficulty for example in seen + unseen} == {1}
+
+    for example in seen:
+        a, b, c = [int(token) for token in re.findall(r"\d+", example.problem)]
+        assert 0 <= a <= 25
+        assert 0 <= b <= 25
+        assert 0 <= c <= 10
+
+    for example in unseen:
+        a, b, c = [int(token) for token in re.findall(r"\d+", example.problem)]
+        assert 26 <= a <= 50
+        assert 26 <= b <= 50
+        assert 11 <= c <= 20
+
+
+def test_compositional_train_mixes_seen_single_and_seen_mixed():
+    examples = generate_math_examples(10, seed=2, curriculum="compositional_train")
+    assert {example.split_label for example in examples} == {"seen_single", "seen_mixed"}
 
 
 def test_trace_respects_multiplication_precedence():

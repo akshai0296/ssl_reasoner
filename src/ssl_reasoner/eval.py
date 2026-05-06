@@ -5,7 +5,13 @@ import argparse
 import torch
 from torch.utils.data import DataLoader
 
-from .data import MATH_FEATURE_VOCAB_SIZE, MathDataset, class_to_value, generate_math_examples
+from .data import (
+    CURRICULA,
+    MATH_FEATURE_VOCAB_SIZE,
+    MathDataset,
+    class_to_value,
+    generate_math_examples,
+)
 from .model import MathJEPAReadout
 from .tokenizer import build_math_tokenizer
 
@@ -42,7 +48,7 @@ def main() -> None:
     parser.add_argument("--fallback-confidence", type=float, default=0.8)
     parser.add_argument(
         "--curriculum",
-        choices=["mixed", "single_op_balanced", "mixed_only"],
+        choices=CURRICULA,
         default="mixed",
     )
     args = parser.parse_args()
@@ -84,6 +90,7 @@ def main() -> None:
     correct = 0
     total = 0
     by_op: dict[str, list[int]] = {}
+    by_split: dict[str, list[int]] = {}
     shown = 0
     with torch.no_grad():
         for batch in loader:
@@ -127,8 +134,12 @@ def main() -> None:
                         )
                     ]
                 references = batch["answer"]
-                for problem, pred, answer, op_label in zip(
-                    batch["problem"], predictions, references, batch["op_label"]
+                for problem, pred, answer, op_label, split_label in zip(
+                    batch["problem"],
+                    predictions,
+                    references,
+                    batch["op_label"],
+                    batch["split_label"],
                 ):
                     is_correct = pred == answer
                     correct += is_correct
@@ -136,6 +147,9 @@ def main() -> None:
                     counts = by_op.setdefault(str(op_label), [0, 0])
                     counts[0] += int(is_correct)
                     counts[1] += 1
+                    split_counts = by_split.setdefault(str(split_label), [0, 0])
+                    split_counts[0] += int(is_correct)
+                    split_counts[1] += 1
                     if shown < 10:
                         mark = "ok" if is_correct else "bad"
                         print(f"{mark}: {problem} -> pred={pred!r} target={answer!r}")
@@ -163,8 +177,12 @@ def main() -> None:
                 )
                 references = batch["trace"]
             predictions = [tokenizer.decode(ids).strip() for ids in decoded]
-            for problem, pred, answer, op_label in zip(
-                batch["problem"], predictions, references, batch["op_label"]
+            for problem, pred, answer, op_label, split_label in zip(
+                batch["problem"],
+                predictions,
+                references,
+                batch["op_label"],
+                batch["split_label"],
             ):
                 is_correct = pred == answer
                 correct += is_correct
@@ -172,6 +190,9 @@ def main() -> None:
                 counts = by_op.setdefault(str(op_label), [0, 0])
                 counts[0] += int(is_correct)
                 counts[1] += 1
+                split_counts = by_split.setdefault(str(split_label), [0, 0])
+                split_counts[0] += int(is_correct)
+                split_counts[1] += 1
                 if shown < 10:
                     mark = "ok" if is_correct else "bad"
                     print(f"{mark}: {problem} -> pred={pred!r} target={answer!r}")
@@ -185,6 +206,9 @@ def main() -> None:
     for op_label, counts in sorted(by_op.items()):
         acc = counts[0] / max(counts[1], 1)
         print(f"{args.mode}_op_{op_label}_exact={acc:.3f} ({counts[0]}/{counts[1]})")
+    for split_label, counts in sorted(by_split.items()):
+        acc = counts[0] / max(counts[1], 1)
+        print(f"{args.mode}_split_{split_label}_exact={acc:.3f} ({counts[0]}/{counts[1]})")
 
 
 if __name__ == "__main__":

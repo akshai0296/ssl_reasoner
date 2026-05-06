@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from .data import MATH_FEATURE_VOCAB_SIZE, MathDataset, generate_math_examples
+from .data import CURRICULA, MATH_FEATURE_VOCAB_SIZE, MathDataset, generate_math_examples
 from .diagnostics import latent_health
 from .model import MathJEPAReadout
 from .tokenizer import build_math_tokenizer
@@ -73,18 +73,26 @@ def evaluate_with_breakdown(
     correct = 0
     total = 0
     by_op: dict[str, list[int]] = {}
+    by_split: dict[str, list[int]] = {}
     for batch in loader:
         predictions = predict_batch(model, batch, tokenizer, device, mode=mode)
-        for pred, answer, op_label in zip(predictions, batch["answer"], batch["op_label"]):
+        for pred, answer, op_label, split_label in zip(
+            predictions, batch["answer"], batch["op_label"], batch["split_label"]
+        ):
             is_correct = int(pred == answer)
             correct += is_correct
             total += 1
             counts = by_op.setdefault(str(op_label), [0, 0])
             counts[0] += is_correct
             counts[1] += 1
+            split_counts = by_split.setdefault(str(split_label), [0, 0])
+            split_counts[0] += is_correct
+            split_counts[1] += 1
     stats = {"overall": correct / max(total, 1)}
     for op_label, counts in sorted(by_op.items()):
         stats[f"op_{op_label}"] = counts[0] / max(counts[1], 1)
+    for split_label, counts in sorted(by_split.items()):
+        stats[f"split_{split_label}"] = counts[0] / max(counts[1], 1)
     return stats
 
 
@@ -170,6 +178,7 @@ def format_samples(
         "trace": [item["trace"] for item in subset],
         "problem": [item["problem"] for item in subset],
         "op_label": [item["op_label"] for item in subset],
+        "split_label": [item["split_label"] for item in subset],
     }
     predictions = predict_batch(model, batch, tokenizer, device, mode=mode)
     rows = []
@@ -323,8 +332,14 @@ def run_stage(
                     for key, value in pred_stats.items()
                     if key.startswith("op_")
                 )
-                if op_metrics:
-                    print(f"  pred_breakdown {op_metrics}")
+                split_metrics = " ".join(
+                    f"{key}={value:.3f}"
+                    for key, value in pred_stats.items()
+                    if key.startswith("split_")
+                )
+                breakdown = " ".join(part for part in [op_metrics, split_metrics] if part)
+                if breakdown:
+                    print(f"  pred_breakdown {breakdown}")
                 if name == "stage1_predictor":
                     diag = latent_health(model, val_dataset, device, batch_size)
                     print(
@@ -358,12 +373,12 @@ def main() -> None:
     parser.add_argument("--val-size", type=int, default=500)
     parser.add_argument(
         "--train-curriculum",
-        choices=["mixed", "single_op_balanced", "mixed_only"],
+        choices=CURRICULA,
         default="mixed",
     )
     parser.add_argument(
         "--val-curriculum",
-        choices=["mixed", "single_op_balanced", "mixed_only"],
+        choices=CURRICULA,
         default="mixed",
     )
     parser.add_argument("--batch-size", type=int, default=64)

@@ -33,3 +33,15 @@ python -m ssl_reasoner.train \
 ```bash
 python -m ssl_reasoner.eval --checkpoint checkpoints/best.pt --samples 500
 ```
+
+## Compositional Split Diagnostic
+
+The math generator includes seen/unseen operand-range splits for checking whether the
+reasoner learned reusable arithmetic behavior instead of memorizing local ranges:
+
+```bash
+scripts/eval_compositional_splits.sh checkpoints/predictor_structured_answer/best.pt
+```
+
+Available split curricula are `seen_single`, `unseen_single`, `seen_mixed`,
+`unseen_mixed`, and `compositional_train`.

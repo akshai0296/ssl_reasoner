@@ -17,6 +17,7 @@ class MathExample:
     op_label: str
     difficulty: int
     trace: str
+    split_label: str = "standard"
 
 
 MATH_FEATURE_PAD_ID = 0
@@ -131,26 +132,87 @@ def make_trace_fields(expr: str) -> tuple[list[int], list[int], list[float]]:
     )
 
 
+def _rand_operand(rng: random.Random, bounds: tuple[int, int]) -> int:
+    return rng.randint(bounds[0], bounds[1])
+
+
 def _make_expression(
-    rng: random.Random, difficulty: int, op: str | None = None
+    rng: random.Random,
+    difficulty: int,
+    op: str | None = None,
+    *,
+    single_add_bounds: tuple[int, int] = (0, 100),
+    single_mul_bounds: tuple[int, int] = (0, 20),
+    mixed_ab_bounds: tuple[int, int] = (0, 50),
+    mixed_c_bounds: tuple[int, int] = (0, 20),
 ) -> tuple[str, int, str]:
     if difficulty == 0:
         op = op or rng.choice(["+", "-", "*"])
-        limit = 20 if op == "*" else 100
-        a = rng.randint(0, limit)
-        b = rng.randint(0, limit)
+        bounds = single_mul_bounds if op == "*" else single_add_bounds
+        a = _rand_operand(rng, bounds)
+        b = _rand_operand(rng, bounds)
         if op == "-":
             a, b = max(a, b), min(a, b)
         expr = f"{a}{op}{b}"
         return expr, eval(expr), op
 
-    a = rng.randint(0, 50)
-    b = rng.randint(0, 50)
-    c = rng.randint(0, 20)
+    a = _rand_operand(rng, mixed_ab_bounds)
+    b = _rand_operand(rng, mixed_ab_bounds)
+    c = _rand_operand(rng, mixed_c_bounds)
     op1 = rng.choice(["+", "-"])
     op2 = rng.choice(["+", "-", "*"])
     expr = f"{a}{op1}{b}{op2}{c}"
     return expr, eval(expr), "mixed"
+
+
+COMPOSITIONAL_CURRICULA = {
+    "seen_single",
+    "unseen_single",
+    "seen_mixed",
+    "unseen_mixed",
+    "compositional_train",
+}
+CURRICULA = (
+    "mixed",
+    "single_op_balanced",
+    "mixed_only",
+    *sorted(COMPOSITIONAL_CURRICULA),
+)
+
+
+def _compositional_spec(curriculum: str, idx: int) -> tuple[int, str | None, str, dict]:
+    if curriculum == "compositional_train":
+        curriculum = "seen_single" if idx % 2 == 0 else "seen_mixed"
+
+    if curriculum == "seen_single":
+        return (
+            0,
+            ["+", "-", "*"][idx % 3],
+            "seen_single",
+            {"single_add_bounds": (0, 50), "single_mul_bounds": (0, 10)},
+        )
+    if curriculum == "unseen_single":
+        return (
+            0,
+            ["+", "-", "*"][idx % 3],
+            "unseen_single",
+            {"single_add_bounds": (51, 100), "single_mul_bounds": (11, 20)},
+        )
+    if curriculum == "seen_mixed":
+        return (
+            1,
+            None,
+            "seen_mixed",
+            {"mixed_ab_bounds": (0, 25), "mixed_c_bounds": (0, 10)},
+        )
+    if curriculum == "unseen_mixed":
+        return (
+            1,
+            None,
+            "unseen_mixed",
+            {"mixed_ab_bounds": (26, 50), "mixed_c_bounds": (11, 20)},
+        )
+    raise ValueError(f"Unknown compositional curriculum: {curriculum}")
 
 
 def generate_math_examples(
@@ -163,6 +225,8 @@ def generate_math_examples(
     examples = []
     ops = ["+", "-", "*"]
     for idx in range(n):
+        split_label = "standard"
+        expression_kwargs = {}
         if curriculum == "mixed":
             difficulty = 0 if rng.random() < difficulty_mix[0] else 1
             op = None
@@ -172,9 +236,15 @@ def generate_math_examples(
         elif curriculum == "mixed_only":
             difficulty = 1
             op = None
+        elif curriculum in COMPOSITIONAL_CURRICULA:
+            difficulty, op, split_label, expression_kwargs = _compositional_spec(
+                curriculum, idx
+            )
         else:
             raise ValueError(f"Unknown curriculum: {curriculum}")
-        expr, value, op_label = _make_expression(rng, difficulty, op=op)
+        expr, value, op_label = _make_expression(
+            rng, difficulty, op=op, **expression_kwargs
+        )
         template = rng.choice(
             [
                 "What is {expr}?",
@@ -189,6 +259,7 @@ def generate_math_examples(
                 op_label=op_label,
                 difficulty=difficulty,
                 trace=make_trace(expr),
+                split_label=split_label,
             )
         )
     return examples
@@ -241,4 +312,5 @@ class MathDataset(Dataset):
             "problem": ex.problem,
             "op_label": ex.op_label,
             "difficulty": ex.difficulty,
+            "split_label": ex.split_label,
         }
