@@ -45,6 +45,12 @@ To train only that head on frozen Stage 3 latents:
 scripts/train_reasoning_head.sh
 ```
 
+To train the predictor with reasoning supervision during Stage 1, then re-fit the readout:
+
+```bash
+scripts/predictor_reasoning_stage1.sh
+```
+
 Stage 4 trains the latent verifier on frozen Stage 3 latents:
 
 ```bash
