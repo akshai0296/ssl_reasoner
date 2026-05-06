@@ -7,6 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from .data import MathDataset, generate_math_examples
+from .diagnostics import latent_health
 from .model import MathJEPAReadout
 from .tokenizer import build_math_tokenizer
 
@@ -136,6 +137,15 @@ def run_stage(
                     if key.endswith("loss")
                 )
                 print(f"{name} step={step} {metrics} val_exact={acc:.3f}")
+                if name == "stage1_predictor":
+                    diag = latent_health(model, val_dataset, device, batch_size)
+                    print(
+                        "  latent_health "
+                        f"mean_random_cosine={diag['mean_random_cosine']:.3f} "
+                        f"effective_rank_ratio={diag['effective_rank_ratio']:.3f} "
+                        f"passes_cosine={bool(diag['passes_cosine'])} "
+                        f"passes_rank={bool(diag['passes_rank'])}"
+                    )
                 for row in format_samples(model, val_dataset, tokenizer, device, sample_count):
                     print(row)
                 if acc > best_acc:

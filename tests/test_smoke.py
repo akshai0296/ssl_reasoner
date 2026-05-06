@@ -1,6 +1,7 @@
 import torch
 
 from ssl_reasoner.data import MathDataset, generate_math_examples
+from ssl_reasoner.diagnostics import latent_health
 from ssl_reasoner.model import MathJEPAReadout
 from ssl_reasoner.tokenizer import build_math_tokenizer
 
@@ -20,3 +21,15 @@ def test_forward_shapes():
     assert out["pred_slots"].shape == (4, 8, 128)
     decoded = model.solve_ids(problem_ids, pad_id=tokenizer.pad_id)
     assert len(decoded) == 4
+
+
+def test_latent_health_keys():
+    tokenizer = build_math_tokenizer()
+    dataset = MathDataset(generate_math_examples(8), tokenizer)
+    model = MathJEPAReadout(vocab_size=tokenizer.vocab_size)
+    stats = latent_health(model, dataset, torch.device("cpu"), batch_size=4)
+
+    assert "mean_random_cosine" in stats
+    assert "effective_rank_ratio" in stats
+    assert "passes_cosine" in stats
+    assert "passes_rank" in stats
