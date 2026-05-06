@@ -27,7 +27,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=123)
-    parser.add_argument("--mode", choices=["pred", "target"], default="pred")
+    parser.add_argument("--mode", choices=["pred", "target", "trace"], default="pred")
     parser.add_argument(
         "--curriculum",
         choices=["mixed", "single_op_balanced", "mixed_only"],
@@ -53,6 +53,8 @@ def main() -> None:
         use_math_features=train_args.get("use_math_features", False),
         math_vocab_size=MATH_FEATURE_VOCAB_SIZE,
         max_math_len=train_args.get("max_math_len", 8),
+        use_reasoning_trace=train_args.get("use_reasoning_trace", False),
+        max_trace_len=train_args.get("max_trace_len", 32),
     ).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
@@ -63,6 +65,7 @@ def main() -> None:
         train_args["max_problem_len"],
         train_args["max_answer_len"],
         train_args.get("max_math_len", 8),
+        train_args.get("max_trace_len", 32),
     )
     loader = DataLoader(dataset, batch_size=args.batch_size)
     correct = 0
@@ -77,15 +80,24 @@ def main() -> None:
                     pad_id=tokenizer.pad_id,
                     math_ids=batch["math_ids"].to(device),
                 )
-            else:
+                references = batch["answer"]
+            elif args.mode == "target":
                 decoded = model.solve_ids_from_target(
                     batch["answer_ids"].to(device),
                     pad_id=tokenizer.pad_id,
                     use_ema=True,
                 )
+                references = batch["answer"]
+            else:
+                decoded = model.solve_trace_ids(
+                    batch["problem_ids"].to(device),
+                    pad_id=tokenizer.pad_id,
+                    math_ids=batch["math_ids"].to(device),
+                )
+                references = batch["trace"]
             predictions = [tokenizer.decode(ids).strip() for ids in decoded]
             for problem, pred, answer, op_label in zip(
-                batch["problem"], predictions, batch["answer"], batch["op_label"]
+                batch["problem"], predictions, references, batch["op_label"]
             ):
                 is_correct = pred == answer
                 correct += is_correct

@@ -130,6 +130,8 @@ def main() -> None:
         use_math_features=train_args.get("use_math_features", False),
         math_vocab_size=MATH_FEATURE_VOCAB_SIZE,
         max_math_len=train_args.get("max_math_len", 8),
+        use_reasoning_trace=train_args.get("use_reasoning_trace", False),
+        max_trace_len=train_args.get("max_trace_len", 32),
     ).to(device)
     model.load_state_dict(ckpt["model"])
 
@@ -139,6 +141,7 @@ def main() -> None:
         train_args["max_problem_len"],
         train_args["max_answer_len"],
         train_args.get("max_math_len", 8),
+        train_args.get("max_trace_len", 32),
     )
     ablation_train = MathDataset(
         generate_math_examples(
@@ -148,6 +151,7 @@ def main() -> None:
         train_args["max_problem_len"],
         train_args["max_answer_len"],
         train_args.get("max_math_len", 8),
+        train_args.get("max_trace_len", 32),
     )
 
     baseline = exact_match(model, eval_dataset, tokenizer, device, args.batch_size)

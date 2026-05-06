@@ -228,10 +228,13 @@ class MathJEPAReadout(nn.Module):
         use_math_features: bool = False,
         math_vocab_size: int = 205,
         max_math_len: int = 8,
+        use_reasoning_trace: bool = False,
+        max_trace_len: int = 32,
     ):
         super().__init__()
         self.predictor_type = predictor_type
         self.use_math_features = use_math_features
+        self.use_reasoning_trace = use_reasoning_trace
         self.problem_encoder = MeanPoolEncoder(
             vocab_size, d_model, max_problem_len, num_layers=encoder_layers, num_heads=num_heads
         )
@@ -245,6 +248,13 @@ class MathJEPAReadout(nn.Module):
         self.target_encoder_ema = copy.deepcopy(self.target_encoder)
         for param in self.target_encoder_ema.parameters():
             param.requires_grad = False
+        if use_reasoning_trace:
+            self.trace_target_encoder = SlotTargetEncoder(
+                vocab_size, d_model, max_trace_len, num_slots, num_heads=num_heads
+            )
+            self.trace_target_encoder_ema = copy.deepcopy(self.trace_target_encoder)
+            for param in self.trace_target_encoder_ema.parameters():
+                param.requires_grad = False
         if predictor_type == "pooled":
             self.predictor = SequencePredictor(
                 d_model, num_slots, num_layers=predictor_layers, num_heads=num_heads
@@ -258,6 +268,13 @@ class MathJEPAReadout(nn.Module):
         self.readout = ParallelReadoutDecoder(
             d_model, vocab_size, max_answer_len, num_layers=readout_layers, num_heads=num_heads
         )
+        if use_reasoning_trace:
+            self.trace_predictor = CrossAttentionSequencePredictor(
+                d_model, num_slots, num_layers=predictor_layers, num_heads=num_heads
+            )
+            self.trace_readout = ParallelReadoutDecoder(
+                d_model, vocab_size, max_trace_len, num_layers=readout_layers, num_heads=num_heads
+            )
 
     @torch.no_grad()
     def ema_update_target_encoder(self, decay: float = 0.996) -> None:
@@ -265,10 +282,18 @@ class MathJEPAReadout(nn.Module):
             self.target_encoder_ema.parameters(), self.target_encoder.parameters()
         ):
             ema_param.data.mul_(decay).add_(param.data, alpha=1.0 - decay)
+        if self.use_reasoning_trace:
+            for ema_param, param in zip(
+                self.trace_target_encoder_ema.parameters(),
+                self.trace_target_encoder.parameters(),
+            ):
+                ema_param.data.mul_(decay).add_(param.data, alpha=1.0 - decay)
 
     @torch.no_grad()
     def sync_target_encoder_ema(self) -> None:
         self.target_encoder_ema.load_state_dict(self.target_encoder.state_dict())
+        if self.use_reasoning_trace:
+            self.trace_target_encoder_ema.load_state_dict(self.trace_target_encoder.state_dict())
 
     def encode_context(self, problem_ids: torch.Tensor) -> torch.Tensor:
         return self.problem_encoder(problem_ids)
@@ -289,6 +314,10 @@ class MathJEPAReadout(nn.Module):
         encoder = self.target_encoder_ema if use_ema else self.target_encoder
         return encoder(answer_ids)
 
+    def encode_trace_target(self, trace_ids: torch.Tensor, use_ema: bool = True) -> torch.Tensor:
+        encoder = self.trace_target_encoder_ema if use_ema else self.trace_target_encoder
+        return encoder(trace_ids)
+
     def predict_slots(
         self, problem_ids: torch.Tensor, math_ids: torch.Tensor | None = None
     ) -> torch.Tensor:
@@ -296,6 +325,12 @@ class MathJEPAReadout(nn.Module):
             tokens, mask = self.encode_context_sequence(problem_ids, math_ids)
             return self.predictor(tokens, mask)
         return self.predictor(self.encode_context(problem_ids))
+
+    def predict_trace_slots(
+        self, problem_ids: torch.Tensor, math_ids: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        tokens, mask = self.encode_context_sequence(problem_ids, math_ids)
+        return self.trace_predictor(tokens, mask)
 
     def readout_loss(
         self,
@@ -316,6 +351,27 @@ class MathJEPAReadout(nn.Module):
             "loss": token_loss + 0.1 * length_loss,
             "token_loss": token_loss,
             "length_loss": length_loss,
+        }
+
+    def trace_readout_loss(
+        self,
+        slots: torch.Tensor,
+        trace_ids: torch.Tensor,
+        trace_len: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        readout = self.trace_readout(slots)
+        token_loss = F.cross_entropy(
+            readout["token_logits"].transpose(1, 2),
+            trace_ids,
+            ignore_index=0,
+        )
+        length_loss = F.cross_entropy(
+            readout["length_logits"], trace_len.clamp(max=trace_ids.size(1) - 1)
+        )
+        return {
+            "loss": token_loss + 0.1 * length_loss,
+            "trace_token_loss": token_loss,
+            "trace_length_loss": length_loss,
         }
 
     @staticmethod
@@ -361,21 +417,35 @@ class MathJEPAReadout(nn.Module):
         self,
         answer_ids: torch.Tensor,
         answer_len: torch.Tensor,
+        trace_ids: torch.Tensor | None = None,
+        trace_len: torch.Tensor | None = None,
+        trace_weight: float = 1.0,
     ) -> dict[str, torch.Tensor]:
         target_slots = self.encode_target(answer_ids, use_ema=False)
         out = self.readout_loss(target_slots, answer_ids, answer_len)
-        return {
+        result = {
             "loss": out["loss"],
             "token_loss": out["token_loss"],
             "length_loss": out["length_loss"],
             "target_slots": target_slots.detach(),
         }
+        if self.use_reasoning_trace and trace_ids is not None and trace_len is not None:
+            trace_slots = self.encode_trace_target(trace_ids, use_ema=False)
+            trace_out = self.trace_readout_loss(trace_slots, trace_ids, trace_len)
+            result["loss"] = result["loss"] + trace_weight * trace_out["loss"]
+            result["trace_token_loss"] = trace_out["trace_token_loss"]
+            result["trace_length_loss"] = trace_out["trace_length_loss"]
+            result["trace_target_slots"] = trace_slots.detach()
+        return result
 
     def stage1_predictor(
         self,
         problem_ids: torch.Tensor,
         answer_ids: torch.Tensor,
         math_ids: torch.Tensor | None = None,
+        trace_ids: torch.Tensor | None = None,
+        trace_len: torch.Tensor | None = None,
+        trace_weight: float = 0.5,
         contrastive_weight: float = 0.1,
         vicreg_weight: float = 0.05,
         slot_diversity_weight: float = 0.1,
@@ -396,7 +466,7 @@ class MathJEPAReadout(nn.Module):
             + slot_diversity_weight * diversity_loss
             + batch_diversity_weight * batch_diversity
         )
-        return {
+        result = {
             "loss": loss,
             "pred_loss": pred_loss,
             "contrastive_loss": contrastive_loss,
@@ -406,6 +476,24 @@ class MathJEPAReadout(nn.Module):
             "pred_slots": pred_slots.detach(),
             "target_slots": target_slots.detach(),
         }
+        if self.use_reasoning_trace and trace_ids is not None:
+            trace_pred_slots = self.predict_trace_slots(problem_ids, math_ids)
+            with torch.no_grad():
+                trace_target_slots = self.encode_trace_target(trace_ids, use_ema=True)
+            trace_pred_loss = F.smooth_l1_loss(trace_pred_slots, trace_target_slots)
+            trace_contrastive_loss = self.info_nce_loss(trace_pred_slots, trace_target_slots)
+            trace_aux_loss = trace_pred_loss + contrastive_weight * trace_contrastive_loss
+            if trace_len is not None:
+                trace_dec = self.trace_readout_loss(trace_pred_slots, trace_ids, trace_len)
+                trace_aux_loss = trace_aux_loss + 0.1 * trace_dec["loss"]
+                result["trace_token_loss"] = trace_dec["trace_token_loss"]
+                result["trace_length_loss"] = trace_dec["trace_length_loss"]
+            result["loss"] = result["loss"] + trace_weight * trace_aux_loss
+            result["trace_pred_loss"] = trace_pred_loss
+            result["trace_contrastive_loss"] = trace_contrastive_loss
+            result["trace_pred_slots"] = trace_pred_slots.detach()
+            result["trace_target_slots"] = trace_target_slots.detach()
+        return result
 
     def stage2_readout(
         self,
@@ -413,6 +501,9 @@ class MathJEPAReadout(nn.Module):
         answer_ids: torch.Tensor,
         answer_len: torch.Tensor,
         math_ids: torch.Tensor | None = None,
+        trace_ids: torch.Tensor | None = None,
+        trace_len: torch.Tensor | None = None,
+        trace_weight: float = 0.5,
         true_latent_ratio: float = 0.5,
         target_readout_weight: float = 1.0,
     ) -> dict[str, torch.Tensor]:
@@ -441,11 +532,21 @@ class MathJEPAReadout(nn.Module):
         answer_ids: torch.Tensor,
         answer_len: torch.Tensor,
         math_ids: torch.Tensor | None = None,
+        trace_ids: torch.Tensor | None = None,
+        trace_len: torch.Tensor | None = None,
+        trace_weight: float = 0.5,
     ):
-        pred_out = self.stage1_predictor(problem_ids, answer_ids, math_ids=math_ids)
+        pred_out = self.stage1_predictor(
+            problem_ids,
+            answer_ids,
+            math_ids=math_ids,
+            trace_ids=trace_ids,
+            trace_len=trace_len,
+            trace_weight=trace_weight,
+        )
         dec_out = self.readout_loss(pred_out["pred_slots"], answer_ids, answer_len)
         total_loss = pred_out["loss"] + dec_out["loss"]
-        return {
+        result = {
             "loss": total_loss,
             "pred_loss": pred_out["pred_loss"],
             "contrastive_loss": pred_out["contrastive_loss"],
@@ -456,6 +557,16 @@ class MathJEPAReadout(nn.Module):
             "length_loss": dec_out["length_loss"],
             "pred_slots": pred_out["pred_slots"],
         }
+        for key in [
+            "trace_pred_loss",
+            "trace_contrastive_loss",
+            "trace_token_loss",
+            "trace_length_loss",
+            "trace_pred_slots",
+        ]:
+            if key in pred_out:
+                result[key] = pred_out[key]
+        return result
 
     @torch.no_grad()
     def solve_ids(
@@ -463,6 +574,13 @@ class MathJEPAReadout(nn.Module):
     ) -> list[list[int]]:
         slots = self.predict_slots(problem_ids, math_ids)
         return self.readout.decode_ids(slots, pad_id=pad_id)
+
+    @torch.no_grad()
+    def solve_trace_ids(
+        self, problem_ids: torch.Tensor, pad_id: int, math_ids: torch.Tensor | None = None
+    ) -> list[list[int]]:
+        slots = self.predict_trace_slots(problem_ids, math_ids)
+        return self.trace_readout.decode_ids(slots, pad_id=pad_id)
 
     @torch.no_grad()
     def solve_ids_from_target(

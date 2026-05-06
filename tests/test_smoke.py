@@ -1,6 +1,6 @@
 import torch
 
-from ssl_reasoner.data import MathDataset, encode_math_features, generate_math_examples
+from ssl_reasoner.data import MathDataset, encode_math_features, generate_math_examples, make_trace
 from ssl_reasoner.diagnostics import latent_health
 from ssl_reasoner.model import MathJEPAReadout
 from ssl_reasoner.tokenizer import build_math_tokenizer
@@ -74,6 +74,11 @@ def test_mixed_only_curriculum_uses_three_term_expressions():
     assert {example.difficulty for example in examples} == {1}
 
 
+def test_trace_respects_multiplication_precedence():
+    assert make_trace("20+1*0") == "1*0=0 20+0=20"
+    assert make_trace("30+41+12") == "30+41=71 71+12=83"
+
+
 def test_cross_attention_with_math_features_forward():
     tokenizer = build_math_tokenizer()
     dataset = MathDataset(generate_math_examples(4), tokenizer)
@@ -92,3 +97,36 @@ def test_cross_attention_with_math_features_forward():
 
     assert out["loss"].ndim == 0
     assert out["pred_slots"].shape == (4, 8, 128)
+
+
+def test_reasoning_trace_forward():
+    tokenizer = build_math_tokenizer()
+    dataset = MathDataset(generate_math_examples(4), tokenizer)
+    batch = [dataset[i] for i in range(4)]
+    problem_ids = torch.stack([item["problem_ids"] for item in batch])
+    answer_ids = torch.stack([item["answer_ids"] for item in batch])
+    answer_len = torch.stack([item["answer_len"] for item in batch])
+    math_ids = torch.stack([item["math_ids"] for item in batch])
+    trace_ids = torch.stack([item["trace_ids"] for item in batch])
+    trace_len = torch.stack([item["trace_len"] for item in batch])
+
+    model = MathJEPAReadout(
+        vocab_size=tokenizer.vocab_size,
+        predictor_type="cross_attn",
+        use_math_features=True,
+        use_reasoning_trace=True,
+    )
+    out = model(
+        problem_ids,
+        answer_ids,
+        answer_len,
+        math_ids=math_ids,
+        trace_ids=trace_ids,
+        trace_len=trace_len,
+    )
+    decoded_trace = model.solve_trace_ids(problem_ids, pad_id=tokenizer.pad_id, math_ids=math_ids)
+
+    assert out["loss"].ndim == 0
+    assert out["pred_slots"].shape == (4, 8, 128)
+    assert out["trace_pred_loss"].ndim == 0
+    assert len(decoded_trace) == 4

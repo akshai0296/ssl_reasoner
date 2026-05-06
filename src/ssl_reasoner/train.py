@@ -48,6 +48,16 @@ def predict_batch(model, batch, tokenizer, device, mode: str = "pred") -> list[s
 
 
 @torch.no_grad()
+def predict_trace_batch(model, batch, tokenizer, device) -> list[str]:
+    decoded_ids = model.solve_trace_ids(
+        batch["problem_ids"].to(device),
+        pad_id=tokenizer.pad_id,
+        math_ids=batch["math_ids"].to(device),
+    )
+    return [tokenizer.decode(ids).strip() for ids in decoded_ids]
+
+
+@torch.no_grad()
 def evaluate(model, dataset, tokenizer, device, batch_size: int, mode: str = "pred") -> float:
     return evaluate_with_breakdown(model, dataset, tokenizer, device, batch_size, mode=mode)[
         "overall"
@@ -79,6 +89,22 @@ def evaluate_with_breakdown(
 
 
 @torch.no_grad()
+def evaluate_trace(model, dataset, tokenizer, device, batch_size: int) -> float:
+    if not model.use_reasoning_trace:
+        return 0.0
+    model.eval()
+    loader = DataLoader(dataset, batch_size=batch_size)
+    correct = 0
+    total = 0
+    for batch in loader:
+        predictions = predict_trace_batch(model, batch, tokenizer, device)
+        for pred, trace in zip(predictions, batch["trace"]):
+            correct += int(pred == trace)
+            total += 1
+    return correct / max(total, 1)
+
+
+@torch.no_grad()
 def format_samples(
     model,
     dataset,
@@ -94,6 +120,7 @@ def format_samples(
         "answer_ids": torch.stack([item["answer_ids"] for item in subset]),
         "math_ids": torch.stack([item["math_ids"] for item in subset]),
         "answer": [item["answer"] for item in subset],
+        "trace": [item["trace"] for item in subset],
         "problem": [item["problem"] for item in subset],
         "op_label": [item["op_label"] for item in subset],
     }
@@ -155,14 +182,25 @@ def run_stage(
             answer_ids = batch["answer_ids"].to(device)
             answer_len = batch["answer_len"].to(device)
             math_ids = batch["math_ids"].to(device)
+            trace_ids = batch["trace_ids"].to(device)
+            trace_len = batch["trace_len"].to(device)
 
             if name == "stage0_target_warmup":
-                out = model.stage0_target_autoencode(answer_ids, answer_len)
+                out = model.stage0_target_autoencode(
+                    answer_ids,
+                    answer_len,
+                    trace_ids=trace_ids,
+                    trace_len=trace_len,
+                    trace_weight=args.trace_weight,
+                )
             elif name == "stage1_predictor":
                 out = model.stage1_predictor(
                     problem_ids,
                     answer_ids,
                     math_ids=math_ids,
+                    trace_ids=trace_ids,
+                    trace_len=trace_len,
+                    trace_weight=args.trace_weight,
                     contrastive_weight=args.contrastive_weight,
                     vicreg_weight=args.vicreg_weight,
                     slot_diversity_weight=args.slot_diversity_weight,
@@ -200,6 +238,7 @@ def run_stage(
                 target_acc = evaluate(
                     model, val_dataset, tokenizer, device, batch_size, mode="target"
                 )
+                trace_acc = evaluate_trace(model, val_dataset, tokenizer, device, batch_size)
                 metrics = " ".join(
                     f"{key}={value.item():.4f}"
                     for key, value in out.items()
@@ -207,7 +246,8 @@ def run_stage(
                 )
                 print(
                     f"{name} step={step} {metrics} "
-                    f"pred_exact={pred_acc:.3f} target_exact={target_acc:.3f}"
+                    f"pred_exact={pred_acc:.3f} target_exact={target_acc:.3f} "
+                    f"trace_exact={trace_acc:.3f}"
                 )
                 op_metrics = " ".join(
                     f"{key}={value:.3f}"
@@ -269,7 +309,9 @@ def main() -> None:
     parser.add_argument("--max-problem-len", type=int, default=64)
     parser.add_argument("--max-answer-len", type=int, default=16)
     parser.add_argument("--max-math-len", type=int, default=8)
+    parser.add_argument("--max-trace-len", type=int, default=32)
     parser.add_argument("--use-math-features", action="store_true")
+    parser.add_argument("--use-reasoning-trace", action="store_true")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--output-dir", default="checkpoints")
     parser.add_argument("--checkpoint", default=None, help="Optional checkpoint to resume from.")
@@ -289,6 +331,7 @@ def main() -> None:
     parser.add_argument("--ema-decay", type=float, default=0.996)
     parser.add_argument("--true-latent-ratio", type=float, default=1.0)
     parser.add_argument("--target-readout-weight", type=float, default=1.0)
+    parser.add_argument("--trace-weight", type=float, default=0.5)
     parser.add_argument(
         "--stages",
         default="0,1,2",
@@ -315,6 +358,7 @@ def main() -> None:
         args.max_problem_len = ckpt_args.get("max_problem_len", args.max_problem_len)
         args.max_answer_len = ckpt_args.get("max_answer_len", args.max_answer_len)
         args.max_math_len = ckpt_args.get("max_math_len", args.max_math_len)
+        args.max_trace_len = ckpt_args.get("max_trace_len", args.max_trace_len)
         args.d_model = ckpt_args.get("d_model", args.d_model)
         args.num_slots = ckpt_args.get("num_slots", args.num_slots)
         args.encoder_layers = ckpt_args.get("encoder_layers", args.encoder_layers)
@@ -324,6 +368,9 @@ def main() -> None:
             args.predictor_layers = ckpt_args.get("predictor_layers", args.predictor_layers)
             args.predictor_type = ckpt_args.get("predictor_type", args.predictor_type)
             args.use_math_features = ckpt_args.get("use_math_features", args.use_math_features)
+            args.use_reasoning_trace = ckpt_args.get(
+                "use_reasoning_trace", args.use_reasoning_trace
+            )
 
     train_examples = generate_math_examples(
         args.train_size, seed=args.seed, curriculum=args.train_curriculum
@@ -336,10 +383,20 @@ def main() -> None:
         )
     )
     train_dataset = MathDataset(
-        train_examples, tokenizer, args.max_problem_len, args.max_answer_len, args.max_math_len
+        train_examples,
+        tokenizer,
+        args.max_problem_len,
+        args.max_answer_len,
+        args.max_math_len,
+        args.max_trace_len,
     )
     val_dataset = MathDataset(
-        val_examples, tokenizer, args.max_problem_len, args.max_answer_len, args.max_math_len
+        val_examples,
+        tokenizer,
+        args.max_problem_len,
+        args.max_answer_len,
+        args.max_math_len,
+        args.max_trace_len,
     )
     loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
 
@@ -357,6 +414,8 @@ def main() -> None:
         use_math_features=args.use_math_features,
         math_vocab_size=MATH_FEATURE_VOCAB_SIZE,
         max_math_len=args.max_math_len,
+        use_reasoning_trace=args.use_reasoning_trace,
+        max_trace_len=args.max_trace_len,
     ).to(device)
     if checkpoint is not None:
         if args.partial_checkpoint:
@@ -376,11 +435,14 @@ def main() -> None:
         _set_trainable(model.predictor, False)
         _set_trainable(model.target_encoder, True)
         _set_trainable(model.readout, True)
-        optimizer = torch.optim.AdamW(
-            list(model.target_encoder.parameters()) + list(model.readout.parameters()),
-            lr=args.lr,
-            weight_decay=0.01,
-        )
+        stage0_params = list(model.target_encoder.parameters()) + list(model.readout.parameters())
+        if args.use_reasoning_trace:
+            _set_trainable(model.trace_predictor, False)
+            _set_trainable(model.trace_target_encoder, True)
+            _set_trainable(model.trace_readout, True)
+            stage0_params += list(model.trace_target_encoder.parameters())
+            stage0_params += list(model.trace_readout.parameters())
+        optimizer = torch.optim.AdamW(stage0_params, lr=args.lr, weight_decay=0.01)
         best_acc = run_stage(
             name="stage0_target_warmup",
             model=model,
@@ -408,6 +470,11 @@ def main() -> None:
             stage1_params += list(model.math_embed.parameters())
             stage1_params += [model.math_pos_embed]
             stage1_params += list(model.math_norm.parameters())
+        if args.use_reasoning_trace:
+            _set_trainable(model.trace_target_encoder, False)
+            _set_trainable(model.trace_readout, False)
+            _set_trainable(model.trace_predictor, True)
+            stage1_params += list(model.trace_predictor.parameters())
         optimizer = torch.optim.AdamW(
             stage1_params,
             lr=args.lr,
@@ -435,6 +502,10 @@ def main() -> None:
         _set_trainable(model.predictor, False)
         _set_trainable(model.target_encoder, False)
         _set_trainable(model.readout, True)
+        if args.use_reasoning_trace:
+            _set_trainable(model.trace_target_encoder, False)
+            _set_trainable(model.trace_predictor, False)
+            _set_trainable(model.trace_readout, False)
         optimizer = torch.optim.AdamW(model.readout.parameters(), lr=args.lr, weight_decay=0.01)
         best_acc = run_stage(
             name="stage2_readout",

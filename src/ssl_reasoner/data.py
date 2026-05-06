@@ -16,6 +16,7 @@ class MathExample:
     answer: str
     op_label: str
     difficulty: int
+    trace: str
 
 
 MATH_FEATURE_PAD_ID = 0
@@ -42,6 +43,25 @@ def encode_math_features(problem: str, max_len: int = 8) -> list[int]:
     ids = ids[:max_len]
     ids.extend([MATH_FEATURE_PAD_ID] * (max_len - len(ids)))
     return ids
+
+
+def make_trace(expr: str) -> str:
+    parts = re.split(r"([+\-*])", expr)
+    if len(parts) != 5:
+        return f"{expr}={eval(expr)}"
+
+    a, op1, b, op2, c = parts
+    if op2 == "*":
+        first_expr = f"{b}{op2}{c}"
+        first_value = eval(first_expr)
+        second_expr = f"{a}{op1}{first_value}"
+        second_value = eval(second_expr)
+    else:
+        first_expr = f"{a}{op1}{b}"
+        first_value = eval(first_expr)
+        second_expr = f"{first_value}{op2}{c}"
+        second_value = eval(second_expr)
+    return f"{first_expr}={first_value} {second_expr}={second_value}"
 
 
 def _make_expression(
@@ -101,6 +121,7 @@ def generate_math_examples(
                 answer=str(value),
                 op_label=op_label,
                 difficulty=difficulty,
+                trace=make_trace(expr),
             )
         )
     return examples
@@ -114,12 +135,14 @@ class MathDataset(Dataset):
         max_problem_len: int = 64,
         max_answer_len: int = 16,
         max_math_len: int = 8,
+        max_trace_len: int = 32,
     ):
         self.examples = examples
         self.tokenizer = tokenizer
         self.max_problem_len = max_problem_len
         self.max_answer_len = max_answer_len
         self.max_math_len = max_math_len
+        self.max_trace_len = max_trace_len
 
     def __len__(self) -> int:
         return len(self.examples)
@@ -129,13 +152,18 @@ class MathDataset(Dataset):
         problem_ids = self.tokenizer.encode(ex.problem, self.max_problem_len)
         answer_ids = self.tokenizer.encode(ex.answer, self.max_answer_len)
         math_ids = encode_math_features(ex.problem, self.max_math_len)
+        trace_ids = self.tokenizer.encode(ex.trace, self.max_trace_len)
         answer_len = min(len(ex.answer) + 2, self.max_answer_len)
+        trace_len = min(len(ex.trace) + 2, self.max_trace_len)
         return {
             "problem_ids": torch.tensor(problem_ids, dtype=torch.long),
             "math_ids": torch.tensor(math_ids, dtype=torch.long),
             "answer_ids": torch.tensor(answer_ids, dtype=torch.long),
             "answer_len": torch.tensor(answer_len, dtype=torch.long),
+            "trace_ids": torch.tensor(trace_ids, dtype=torch.long),
+            "trace_len": torch.tensor(trace_len, dtype=torch.long),
             "answer": ex.answer,
+            "trace": ex.trace,
             "problem": ex.problem,
             "op_label": ex.op_label,
             "difficulty": ex.difficulty,
