@@ -28,19 +28,28 @@ def _set_trainable(module: torch.nn.Module, trainable: bool) -> None:
 
 
 @torch.no_grad()
-def predict_batch(model, batch, tokenizer, device) -> list[str]:
-    decoded_ids = model.solve_ids(batch["problem_ids"].to(device), pad_id=tokenizer.pad_id)
+def predict_batch(model, batch, tokenizer, device, mode: str = "pred") -> list[str]:
+    if mode == "pred":
+        decoded_ids = model.solve_ids(batch["problem_ids"].to(device), pad_id=tokenizer.pad_id)
+    elif mode == "target":
+        decoded_ids = model.solve_ids_from_target(
+            batch["answer_ids"].to(device),
+            pad_id=tokenizer.pad_id,
+            use_ema=True,
+        )
+    else:
+        raise ValueError(f"Unknown prediction mode: {mode}")
     return [tokenizer.decode(ids).strip() for ids in decoded_ids]
 
 
 @torch.no_grad()
-def evaluate(model, dataset, tokenizer, device, batch_size: int) -> float:
+def evaluate(model, dataset, tokenizer, device, batch_size: int, mode: str = "pred") -> float:
     model.eval()
     loader = DataLoader(dataset, batch_size=batch_size)
     correct = 0
     total = 0
     for batch in loader:
-        predictions = predict_batch(model, batch, tokenizer, device)
+        predictions = predict_batch(model, batch, tokenizer, device, mode=mode)
         for pred, answer in zip(predictions, batch["answer"]):
             correct += pred == answer
             total += 1
@@ -48,15 +57,23 @@ def evaluate(model, dataset, tokenizer, device, batch_size: int) -> float:
 
 
 @torch.no_grad()
-def format_samples(model, dataset, tokenizer, device, count: int = 5) -> list[str]:
+def format_samples(
+    model,
+    dataset,
+    tokenizer,
+    device,
+    count: int = 5,
+    mode: str = "pred",
+) -> list[str]:
     model.eval()
     subset = [dataset[i] for i in range(min(count, len(dataset)))]
     batch = {
         "problem_ids": torch.stack([item["problem_ids"] for item in subset]),
+        "answer_ids": torch.stack([item["answer_ids"] for item in subset]),
         "answer": [item["answer"] for item in subset],
         "problem": [item["problem"] for item in subset],
     }
-    predictions = predict_batch(model, batch, tokenizer, device)
+    predictions = predict_batch(model, batch, tokenizer, device, mode=mode)
     rows = []
     for problem, pred, answer in zip(batch["problem"], predictions, batch["answer"]):
         mark = "ok" if pred == answer else "bad"
@@ -117,7 +134,13 @@ def run_stage(
             elif name == "stage2_readout":
                 progress = step / max(steps - 1, 1)
                 true_ratio = max(0.0, args.true_latent_ratio * (1.0 - progress))
-                out = model.stage2_readout(problem_ids, answer_ids, answer_len, true_ratio)
+                out = model.stage2_readout(
+                    problem_ids,
+                    answer_ids,
+                    answer_len,
+                    true_ratio,
+                    target_readout_weight=args.target_readout_weight,
+                )
             else:
                 raise ValueError(f"Unknown stage: {name}")
 
@@ -132,13 +155,19 @@ def run_stage(
 
             step += 1
             if step == 1 or step % eval_every == 0 or step == steps:
-                acc = evaluate(model, val_dataset, tokenizer, device, batch_size)
+                pred_acc = evaluate(model, val_dataset, tokenizer, device, batch_size, mode="pred")
+                target_acc = evaluate(
+                    model, val_dataset, tokenizer, device, batch_size, mode="target"
+                )
                 metrics = " ".join(
                     f"{key}={value.item():.4f}"
                     for key, value in out.items()
                     if key.endswith("loss")
                 )
-                print(f"{name} step={step} {metrics} val_exact={acc:.3f}")
+                print(
+                    f"{name} step={step} {metrics} "
+                    f"pred_exact={pred_acc:.3f} target_exact={target_acc:.3f}"
+                )
                 if name == "stage1_predictor":
                     diag = latent_health(model, val_dataset, device, batch_size)
                     print(
@@ -148,13 +177,17 @@ def run_stage(
                         f"passes_cosine={bool(diag['passes_cosine'])} "
                         f"passes_rank={bool(diag['passes_rank'])}"
                     )
-                for row in format_samples(model, val_dataset, tokenizer, device, sample_count):
+                for row in format_samples(
+                    model, val_dataset, tokenizer, device, sample_count, mode="pred"
+                ):
                     print(row)
-                if acc > best_acc:
-                    best_acc = acc
+                if pred_acc > best_acc:
+                    best_acc = pred_acc
                     save_checkpoint(model, args, tokenizer, output_dir, best_acc)
             if step >= steps:
                 break
+    if name == "stage0_target_warmup":
+        model.sync_target_encoder_ema()
     return best_acc
 
 
@@ -184,6 +217,7 @@ def main() -> None:
     parser.add_argument("--batch-diversity-weight", type=float, default=0.5)
     parser.add_argument("--ema-decay", type=float, default=0.996)
     parser.add_argument("--true-latent-ratio", type=float, default=1.0)
+    parser.add_argument("--target-readout-weight", type=float, default=1.0)
     parser.add_argument(
         "--stages",
         default="0,1,2",

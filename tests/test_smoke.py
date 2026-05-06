@@ -22,7 +22,9 @@ def test_forward_shapes():
     assert out["slot_diversity_loss"].ndim == 0
     assert out["batch_diversity_loss"].ndim == 0
     decoded = model.solve_ids(problem_ids, pad_id=tokenizer.pad_id)
+    target_decoded = model.solve_ids_from_target(answer_ids, pad_id=tokenizer.pad_id)
     assert len(decoded) == 4
+    assert len(target_decoded) == 4
 
 
 def test_latent_health_keys():

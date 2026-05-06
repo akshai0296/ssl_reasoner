@@ -147,6 +147,10 @@ class MathJEPAReadout(nn.Module):
         ):
             ema_param.data.mul_(decay).add_(param.data, alpha=1.0 - decay)
 
+    @torch.no_grad()
+    def sync_target_encoder_ema(self) -> None:
+        self.target_encoder_ema.load_state_dict(self.target_encoder.state_dict())
+
     def encode_context(self, problem_ids: torch.Tensor) -> torch.Tensor:
         return self.problem_encoder(problem_ids)
 
@@ -272,18 +276,25 @@ class MathJEPAReadout(nn.Module):
         answer_ids: torch.Tensor,
         answer_len: torch.Tensor,
         true_latent_ratio: float = 0.5,
+        target_readout_weight: float = 1.0,
     ) -> dict[str, torch.Tensor]:
         with torch.no_grad():
             pred_slots = self.predict_slots(problem_ids)
             true_slots = self.encode_target(answer_ids, use_ema=True)
-            use_true = torch.rand((), device=problem_ids.device).item() < true_latent_ratio
-            slots = true_slots if use_true else pred_slots
+            use_true = torch.rand(
+                pred_slots.size(0), 1, 1, device=problem_ids.device
+            ) < true_latent_ratio
+            slots = torch.where(use_true, true_slots, pred_slots)
         out = self.readout_loss(slots, answer_ids, answer_len)
+        target_out = self.readout_loss(true_slots, answer_ids, answer_len)
+        total_loss = out["loss"] + target_readout_weight * target_out["loss"]
         return {
-            "loss": out["loss"],
+            "loss": total_loss,
             "token_loss": out["token_loss"],
             "length_loss": out["length_loss"],
-            "used_true_latent": torch.tensor(float(use_true), device=problem_ids.device),
+            "target_token_loss": target_out["token_loss"],
+            "target_length_loss": target_out["length_loss"],
+            "used_true_latent": use_true.float().mean(),
         }
 
     def forward(self, problem_ids: torch.Tensor, answer_ids: torch.Tensor, answer_len: torch.Tensor):
@@ -305,4 +316,14 @@ class MathJEPAReadout(nn.Module):
     @torch.no_grad()
     def solve_ids(self, problem_ids: torch.Tensor, pad_id: int) -> list[list[int]]:
         slots = self.predict_slots(problem_ids)
+        return self.readout.decode_ids(slots, pad_id=pad_id)
+
+    @torch.no_grad()
+    def solve_ids_from_target(
+        self,
+        answer_ids: torch.Tensor,
+        pad_id: int,
+        use_ema: bool = True,
+    ) -> list[list[int]]:
+        slots = self.encode_target(answer_ids, use_ema=use_ema)
         return self.readout.decode_ids(slots, pad_id=pad_id)

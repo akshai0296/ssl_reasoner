@@ -27,6 +27,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--mode", choices=["pred", "target"], default="pred")
     args = parser.parse_args()
 
     device = _device(args.device)
@@ -55,7 +56,16 @@ def main() -> None:
     shown = 0
     with torch.no_grad():
         for batch in loader:
-            decoded = model.solve_ids(batch["problem_ids"].to(device), pad_id=tokenizer.pad_id)
+            if args.mode == "pred":
+                decoded = model.solve_ids(
+                    batch["problem_ids"].to(device), pad_id=tokenizer.pad_id
+                )
+            else:
+                decoded = model.solve_ids_from_target(
+                    batch["answer_ids"].to(device),
+                    pad_id=tokenizer.pad_id,
+                    use_ema=True,
+                )
             predictions = [tokenizer.decode(ids).strip() for ids in decoded]
             for problem, pred, answer in zip(batch["problem"], predictions, batch["answer"]):
                 is_correct = pred == answer
@@ -65,7 +75,7 @@ def main() -> None:
                     mark = "ok" if is_correct else "bad"
                     print(f"{mark}: {problem} -> pred={pred!r} target={answer!r}")
                     shown += 1
-    print(f"exact_match={correct / max(total, 1):.3f} ({correct}/{total})")
+    print(f"{args.mode}_exact_match={correct / max(total, 1):.3f} ({correct}/{total})")
 
 
 if __name__ == "__main__":
