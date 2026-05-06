@@ -11,7 +11,11 @@ def latent_health(model, dataset, device, batch_size: int = 64) -> dict[str, flo
     model.eval()
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     batch = next(iter(loader))
-    slots = model.predict_slots(batch["problem_ids"].to(device))
+    math_ids = batch.get("math_ids")
+    slots = model.predict_slots(
+        batch["problem_ids"].to(device),
+        math_ids.to(device) if math_ids is not None else None,
+    )
     pooled = slots.mean(dim=1)
 
     normed = F.normalize(pooled, dim=-1)

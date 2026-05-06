@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import re
 from dataclasses import dataclass
 
 import torch
@@ -13,6 +14,32 @@ from .tokenizer import CharTokenizer
 class MathExample:
     problem: str
     answer: str
+
+
+MATH_FEATURE_PAD_ID = 0
+MATH_FEATURE_NUM_OFFSET = 1
+MATH_FEATURE_PLUS_ID = 202
+MATH_FEATURE_MINUS_ID = 203
+MATH_FEATURE_TIMES_ID = 204
+MATH_FEATURE_VOCAB_SIZE = 205
+
+
+def encode_math_features(problem: str, max_len: int = 8) -> list[int]:
+    """Extract expression-level operand/operator tokens without exposing the answer."""
+    ids = []
+    for token in re.findall(r"\d+|[+\-*]", problem):
+        if token.isdigit():
+            value = min(int(token), MATH_FEATURE_PLUS_ID - MATH_FEATURE_NUM_OFFSET - 1)
+            ids.append(MATH_FEATURE_NUM_OFFSET + value)
+        elif token == "+":
+            ids.append(MATH_FEATURE_PLUS_ID)
+        elif token == "-":
+            ids.append(MATH_FEATURE_MINUS_ID)
+        elif token == "*":
+            ids.append(MATH_FEATURE_TIMES_ID)
+    ids = ids[:max_len]
+    ids.extend([MATH_FEATURE_PAD_ID] * (max_len - len(ids)))
+    return ids
 
 
 def _make_expression(rng: random.Random, difficulty: int) -> tuple[str, int]:
@@ -63,11 +90,13 @@ class MathDataset(Dataset):
         tokenizer: CharTokenizer,
         max_problem_len: int = 64,
         max_answer_len: int = 16,
+        max_math_len: int = 8,
     ):
         self.examples = examples
         self.tokenizer = tokenizer
         self.max_problem_len = max_problem_len
         self.max_answer_len = max_answer_len
+        self.max_math_len = max_math_len
 
     def __len__(self) -> int:
         return len(self.examples)
@@ -76,9 +105,11 @@ class MathDataset(Dataset):
         ex = self.examples[idx]
         problem_ids = self.tokenizer.encode(ex.problem, self.max_problem_len)
         answer_ids = self.tokenizer.encode(ex.answer, self.max_answer_len)
+        math_ids = encode_math_features(ex.problem, self.max_math_len)
         answer_len = min(len(ex.answer) + 2, self.max_answer_len)
         return {
             "problem_ids": torch.tensor(problem_ids, dtype=torch.long),
+            "math_ids": torch.tensor(math_ids, dtype=torch.long),
             "answer_ids": torch.tensor(answer_ids, dtype=torch.long),
             "answer_len": torch.tensor(answer_len, dtype=torch.long),
             "answer": ex.answer,

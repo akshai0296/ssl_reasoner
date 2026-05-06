@@ -5,7 +5,7 @@ import argparse
 import torch
 from torch.utils.data import DataLoader
 
-from .data import MathDataset, generate_math_examples
+from .data import MATH_FEATURE_VOCAB_SIZE, MathDataset, generate_math_examples
 from .model import MathJEPAReadout
 from .tokenizer import build_math_tokenizer
 
@@ -45,6 +45,9 @@ def main() -> None:
         readout_layers=train_args.get("readout_layers", 2),
         num_heads=train_args.get("num_heads", 4),
         predictor_type=train_args.get("predictor_type", "pooled"),
+        use_math_features=train_args.get("use_math_features", False),
+        math_vocab_size=MATH_FEATURE_VOCAB_SIZE,
+        max_math_len=train_args.get("max_math_len", 8),
     ).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
@@ -54,6 +57,7 @@ def main() -> None:
         tokenizer,
         train_args["max_problem_len"],
         train_args["max_answer_len"],
+        train_args.get("max_math_len", 8),
     )
     loader = DataLoader(dataset, batch_size=args.batch_size)
     correct = 0
@@ -63,7 +67,9 @@ def main() -> None:
         for batch in loader:
             if args.mode == "pred":
                 decoded = model.solve_ids(
-                    batch["problem_ids"].to(device), pad_id=tokenizer.pad_id
+                    batch["problem_ids"].to(device),
+                    pad_id=tokenizer.pad_id,
+                    math_ids=batch["math_ids"].to(device),
                 )
             else:
                 decoded = model.solve_ids_from_target(

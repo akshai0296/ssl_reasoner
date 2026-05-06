@@ -6,7 +6,7 @@ import copy
 import torch
 from torch.utils.data import DataLoader
 
-from .data import MathDataset, generate_math_examples
+from .data import MATH_FEATURE_VOCAB_SIZE, MathDataset, generate_math_examples
 from .model import MathJEPAReadout, ParallelReadoutDecoder
 from .tokenizer import build_math_tokenizer
 
@@ -28,7 +28,11 @@ def exact_match(model, dataset, tokenizer, device, batch_size: int) -> float:
     correct = 0
     total = 0
     for batch in loader:
-        decoded = model.solve_ids(batch["problem_ids"].to(device), pad_id=tokenizer.pad_id)
+        decoded = model.solve_ids(
+            batch["problem_ids"].to(device),
+            pad_id=tokenizer.pad_id,
+            math_ids=batch["math_ids"].to(device),
+        )
         predictions = [tokenizer.decode(ids).strip() for ids in decoded]
         for pred, answer in zip(predictions, batch["answer"]):
             correct += pred == answer
@@ -64,7 +68,9 @@ def train_random_readout_projection_only(
         for batch in loader:
             optimizer.zero_grad(set_to_none=True)
             with torch.no_grad():
-                slots = model.predict_slots(batch["problem_ids"].to(device))
+                slots = model.predict_slots(
+                    batch["problem_ids"].to(device), batch["math_ids"].to(device)
+                )
             out = model.readout_loss(
                 adapter(slots),
                 batch["answer_ids"].to(device),
@@ -79,8 +85,10 @@ def train_random_readout_projection_only(
     original_solve_ids = model.solve_ids
 
     @torch.no_grad()
-    def solve_ids_with_adapter(problem_ids: torch.Tensor, pad_id: int):
-        slots = adapter(model.predict_slots(problem_ids))
+    def solve_ids_with_adapter(
+        problem_ids: torch.Tensor, pad_id: int, math_ids: torch.Tensor | None = None
+    ):
+        slots = adapter(model.predict_slots(problem_ids, math_ids))
         return model.readout.decode_ids(slots, pad_id=pad_id)
 
     model.solve_ids = solve_ids_with_adapter  # type: ignore[method-assign]
@@ -114,6 +122,9 @@ def main() -> None:
         readout_layers=train_args.get("readout_layers", 2),
         num_heads=train_args.get("num_heads", 4),
         predictor_type=train_args.get("predictor_type", "pooled"),
+        use_math_features=train_args.get("use_math_features", False),
+        math_vocab_size=MATH_FEATURE_VOCAB_SIZE,
+        max_math_len=train_args.get("max_math_len", 8),
     ).to(device)
     model.load_state_dict(ckpt["model"])
 
@@ -122,12 +133,14 @@ def main() -> None:
         tokenizer,
         train_args["max_problem_len"],
         train_args["max_answer_len"],
+        train_args.get("max_math_len", 8),
     )
     ablation_train = MathDataset(
         generate_math_examples(args.ablation_train_size, seed=args.seed + 1),
         tokenizer,
         train_args["max_problem_len"],
         train_args["max_answer_len"],
+        train_args.get("max_math_len", 8),
     )
 
     baseline = exact_match(model, eval_dataset, tokenizer, device, args.batch_size)

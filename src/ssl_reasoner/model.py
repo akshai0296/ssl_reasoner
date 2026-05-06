@@ -225,12 +225,20 @@ class MathJEPAReadout(nn.Module):
         readout_layers: int = 2,
         num_heads: int = 4,
         predictor_type: str = "pooled",
+        use_math_features: bool = False,
+        math_vocab_size: int = 205,
+        max_math_len: int = 8,
     ):
         super().__init__()
         self.predictor_type = predictor_type
+        self.use_math_features = use_math_features
         self.problem_encoder = MeanPoolEncoder(
             vocab_size, d_model, max_problem_len, num_layers=encoder_layers, num_heads=num_heads
         )
+        if use_math_features:
+            self.math_embed = nn.Embedding(math_vocab_size, d_model, padding_idx=0)
+            self.math_pos_embed = nn.Parameter(torch.randn(1, max_math_len, d_model) * 0.02)
+            self.math_norm = nn.LayerNorm(d_model)
         self.target_encoder = SlotTargetEncoder(
             vocab_size, d_model, max_answer_len, num_slots, num_heads=num_heads
         )
@@ -266,17 +274,26 @@ class MathJEPAReadout(nn.Module):
         return self.problem_encoder(problem_ids)
 
     def encode_context_sequence(
-        self, problem_ids: torch.Tensor
+        self, problem_ids: torch.Tensor, math_ids: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.problem_encoder.forward_sequence(problem_ids)
+        tokens, mask = self.problem_encoder.forward_sequence(problem_ids)
+        if self.use_math_features and math_ids is not None:
+            math_mask = math_ids.ne(0)
+            math_tokens = self.math_embed(math_ids) + self.math_pos_embed[:, : math_ids.size(1)]
+            math_tokens = self.math_norm(math_tokens)
+            tokens = torch.cat([tokens, math_tokens], dim=1)
+            mask = torch.cat([mask, math_mask], dim=1)
+        return tokens, mask
 
     def encode_target(self, answer_ids: torch.Tensor, use_ema: bool = True) -> torch.Tensor:
         encoder = self.target_encoder_ema if use_ema else self.target_encoder
         return encoder(answer_ids)
 
-    def predict_slots(self, problem_ids: torch.Tensor) -> torch.Tensor:
+    def predict_slots(
+        self, problem_ids: torch.Tensor, math_ids: torch.Tensor | None = None
+    ) -> torch.Tensor:
         if self.predictor_type == "cross_attn":
-            tokens, mask = self.encode_context_sequence(problem_ids)
+            tokens, mask = self.encode_context_sequence(problem_ids, math_ids)
             return self.predictor(tokens, mask)
         return self.predictor(self.encode_context(problem_ids))
 
@@ -358,12 +375,13 @@ class MathJEPAReadout(nn.Module):
         self,
         problem_ids: torch.Tensor,
         answer_ids: torch.Tensor,
+        math_ids: torch.Tensor | None = None,
         contrastive_weight: float = 0.1,
         vicreg_weight: float = 0.05,
         slot_diversity_weight: float = 0.1,
         batch_diversity_weight: float = 0.5,
     ) -> dict[str, torch.Tensor]:
-        pred_slots = self.predict_slots(problem_ids)
+        pred_slots = self.predict_slots(problem_ids, math_ids)
         with torch.no_grad():
             target_slots = self.encode_target(answer_ids, use_ema=True)
         pred_loss = F.smooth_l1_loss(pred_slots, target_slots)
@@ -394,11 +412,12 @@ class MathJEPAReadout(nn.Module):
         problem_ids: torch.Tensor,
         answer_ids: torch.Tensor,
         answer_len: torch.Tensor,
+        math_ids: torch.Tensor | None = None,
         true_latent_ratio: float = 0.5,
         target_readout_weight: float = 1.0,
     ) -> dict[str, torch.Tensor]:
         with torch.no_grad():
-            pred_slots = self.predict_slots(problem_ids)
+            pred_slots = self.predict_slots(problem_ids, math_ids)
             true_slots = self.encode_target(answer_ids, use_ema=True)
             use_true = torch.rand(
                 pred_slots.size(0), 1, 1, device=problem_ids.device
@@ -416,8 +435,14 @@ class MathJEPAReadout(nn.Module):
             "used_true_latent": use_true.float().mean(),
         }
 
-    def forward(self, problem_ids: torch.Tensor, answer_ids: torch.Tensor, answer_len: torch.Tensor):
-        pred_out = self.stage1_predictor(problem_ids, answer_ids)
+    def forward(
+        self,
+        problem_ids: torch.Tensor,
+        answer_ids: torch.Tensor,
+        answer_len: torch.Tensor,
+        math_ids: torch.Tensor | None = None,
+    ):
+        pred_out = self.stage1_predictor(problem_ids, answer_ids, math_ids=math_ids)
         dec_out = self.readout_loss(pred_out["pred_slots"], answer_ids, answer_len)
         total_loss = pred_out["loss"] + dec_out["loss"]
         return {
@@ -433,8 +458,10 @@ class MathJEPAReadout(nn.Module):
         }
 
     @torch.no_grad()
-    def solve_ids(self, problem_ids: torch.Tensor, pad_id: int) -> list[list[int]]:
-        slots = self.predict_slots(problem_ids)
+    def solve_ids(
+        self, problem_ids: torch.Tensor, pad_id: int, math_ids: torch.Tensor | None = None
+    ) -> list[list[int]]:
+        slots = self.predict_slots(problem_ids, math_ids)
         return self.readout.decode_ids(slots, pad_id=pad_id)
 
     @torch.no_grad()

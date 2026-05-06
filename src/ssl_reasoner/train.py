@@ -6,7 +6,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from .data import MathDataset, generate_math_examples
+from .data import MATH_FEATURE_VOCAB_SIZE, MathDataset, generate_math_examples
 from .diagnostics import latent_health
 from .model import MathJEPAReadout
 from .tokenizer import build_math_tokenizer
@@ -30,7 +30,12 @@ def _set_trainable(module: torch.nn.Module, trainable: bool) -> None:
 @torch.no_grad()
 def predict_batch(model, batch, tokenizer, device, mode: str = "pred") -> list[str]:
     if mode == "pred":
-        decoded_ids = model.solve_ids(batch["problem_ids"].to(device), pad_id=tokenizer.pad_id)
+        math_ids = batch.get("math_ids")
+        decoded_ids = model.solve_ids(
+            batch["problem_ids"].to(device),
+            pad_id=tokenizer.pad_id,
+            math_ids=math_ids.to(device) if math_ids is not None else None,
+        )
     elif mode == "target":
         decoded_ids = model.solve_ids_from_target(
             batch["answer_ids"].to(device),
@@ -70,6 +75,7 @@ def format_samples(
     batch = {
         "problem_ids": torch.stack([item["problem_ids"] for item in subset]),
         "answer_ids": torch.stack([item["answer_ids"] for item in subset]),
+        "math_ids": torch.stack([item["math_ids"] for item in subset]),
         "answer": [item["answer"] for item in subset],
         "problem": [item["problem"] for item in subset],
     }
@@ -130,6 +136,7 @@ def run_stage(
             problem_ids = batch["problem_ids"].to(device)
             answer_ids = batch["answer_ids"].to(device)
             answer_len = batch["answer_len"].to(device)
+            math_ids = batch["math_ids"].to(device)
 
             if name == "stage0_target_warmup":
                 out = model.stage0_target_autoencode(answer_ids, answer_len)
@@ -137,6 +144,7 @@ def run_stage(
                 out = model.stage1_predictor(
                     problem_ids,
                     answer_ids,
+                    math_ids=math_ids,
                     contrastive_weight=args.contrastive_weight,
                     vicreg_weight=args.vicreg_weight,
                     slot_diversity_weight=args.slot_diversity_weight,
@@ -149,7 +157,8 @@ def run_stage(
                     problem_ids,
                     answer_ids,
                     answer_len,
-                    true_ratio,
+                    math_ids=math_ids,
+                    true_latent_ratio=true_ratio,
                     target_readout_weight=args.target_readout_weight,
                 )
             else:
@@ -221,6 +230,8 @@ def main() -> None:
     parser.add_argument("--num-heads", type=int, default=4)
     parser.add_argument("--max-problem-len", type=int, default=64)
     parser.add_argument("--max-answer-len", type=int, default=16)
+    parser.add_argument("--max-math-len", type=int, default=8)
+    parser.add_argument("--use-math-features", action="store_true")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--output-dir", default="checkpoints")
     parser.add_argument("--checkpoint", default=None, help="Optional checkpoint to resume from.")
@@ -265,6 +276,7 @@ def main() -> None:
         ckpt_args = checkpoint.get("args", {})
         args.max_problem_len = ckpt_args.get("max_problem_len", args.max_problem_len)
         args.max_answer_len = ckpt_args.get("max_answer_len", args.max_answer_len)
+        args.max_math_len = ckpt_args.get("max_math_len", args.max_math_len)
         args.d_model = ckpt_args.get("d_model", args.d_model)
         args.num_slots = ckpt_args.get("num_slots", args.num_slots)
         args.encoder_layers = ckpt_args.get("encoder_layers", args.encoder_layers)
@@ -273,11 +285,16 @@ def main() -> None:
         if not args.partial_checkpoint:
             args.predictor_layers = ckpt_args.get("predictor_layers", args.predictor_layers)
             args.predictor_type = ckpt_args.get("predictor_type", args.predictor_type)
+            args.use_math_features = ckpt_args.get("use_math_features", args.use_math_features)
 
     train_examples = generate_math_examples(args.train_size, seed=args.seed)
     val_examples = train_examples if args.overfit else generate_math_examples(args.val_size, seed=args.seed + 1)
-    train_dataset = MathDataset(train_examples, tokenizer, args.max_problem_len, args.max_answer_len)
-    val_dataset = MathDataset(val_examples, tokenizer, args.max_problem_len, args.max_answer_len)
+    train_dataset = MathDataset(
+        train_examples, tokenizer, args.max_problem_len, args.max_answer_len, args.max_math_len
+    )
+    val_dataset = MathDataset(
+        val_examples, tokenizer, args.max_problem_len, args.max_answer_len, args.max_math_len
+    )
     loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
 
     model = MathJEPAReadout(
@@ -291,6 +308,9 @@ def main() -> None:
         readout_layers=args.readout_layers,
         num_heads=args.num_heads,
         predictor_type=args.predictor_type,
+        use_math_features=args.use_math_features,
+        math_vocab_size=MATH_FEATURE_VOCAB_SIZE,
+        max_math_len=args.max_math_len,
     ).to(device)
     if checkpoint is not None:
         if args.partial_checkpoint:
@@ -337,8 +357,13 @@ def main() -> None:
         _set_trainable(model.predictor, True)
         _set_trainable(model.target_encoder, False)
         _set_trainable(model.readout, False)
+        stage1_params = list(model.problem_encoder.parameters()) + list(model.predictor.parameters())
+        if args.use_math_features:
+            stage1_params += list(model.math_embed.parameters())
+            stage1_params += [model.math_pos_embed]
+            stage1_params += list(model.math_norm.parameters())
         optimizer = torch.optim.AdamW(
-            list(model.problem_encoder.parameters()) + list(model.predictor.parameters()),
+            stage1_params,
             lr=args.lr,
             weight_decay=0.01,
         )
