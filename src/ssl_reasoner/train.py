@@ -308,6 +308,15 @@ def run_stage(
                     slot_diversity_weight=args.slot_diversity_weight,
                     batch_diversity_weight=args.batch_diversity_weight,
                 )
+            elif name == "reasoning_head":
+                with torch.no_grad():
+                    slots = model.predict_answer_slots(problem_ids, math_ids)
+                out = model.reasoning_struct_loss(
+                    slots,
+                    trace_op_ids,
+                    trace_value_ids,
+                    trace_value_mask,
+                )
             else:
                 raise ValueError(f"Unknown stage: {name}")
 
@@ -367,7 +376,7 @@ def run_stage(
                 breakdown = " ".join(part for part in [op_metrics, split_metrics] if part)
                 if breakdown:
                     print(f"  pred_breakdown {breakdown}")
-                if name in {"stage1_predictor", "stage3_joint"}:
+                if name in {"stage1_predictor", "stage3_joint", "reasoning_head"}:
                     diag = latent_health(model, val_dataset, device, batch_size)
                     print(
                         "  latent_health "
@@ -397,6 +406,7 @@ def main() -> None:
     parser.add_argument("--stage1-steps", type=int, default=None)
     parser.add_argument("--stage2-steps", type=int, default=None)
     parser.add_argument("--stage3-steps", type=int, default=None)
+    parser.add_argument("--reasoning-head-steps", type=int, default=None)
     parser.add_argument("--train-size", type=int, default=5000)
     parser.add_argument("--val-size", type=int, default=500)
     parser.add_argument(
@@ -492,6 +502,7 @@ def main() -> None:
         args.stage1_steps = args.stage1_steps or 500
         args.stage2_steps = args.stage2_steps or 300
         args.stage3_steps = args.stage3_steps or 300
+        args.reasoning_head_steps = args.reasoning_head_steps or 500
 
     torch.manual_seed(args.seed)
     device = _device(args.device)
@@ -737,6 +748,30 @@ def main() -> None:
             device=device,
             optimizer=optimizer,
             steps=args.stage3_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
+
+    if "reasoning_head" in requested_stages or "rh" in requested_stages:
+        for module in model.children():
+            _set_trainable(module, False)
+        _set_trainable(model.reasoning_struct_head, True)
+        optimizer = torch.optim.AdamW(
+            model.reasoning_struct_head.parameters(), lr=args.lr, weight_decay=0.01
+        )
+        best_acc = run_stage(
+            name="reasoning_head",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.reasoning_head_steps,
             batch_size=args.batch_size,
             eval_every=args.eval_every,
             sample_count=args.sample_count,

@@ -39,6 +39,11 @@ The Stage 3 script uses a conservative low learning rate and standard mixed curr
 avoid decoder drift while still updating the encoder, predictor, readout, and trace heads.
 Stage 3 also includes an answer-latent reasoning target for the two operation ids plus the
 intermediate and final values, so mixed-expression reasoning can be supervised directly.
+To train only that head on frozen Stage 3 latents:
+
+```bash
+scripts/train_reasoning_head.sh
+```
 
 Stage 4 trains the latent verifier on frozen Stage 3 latents:
 
