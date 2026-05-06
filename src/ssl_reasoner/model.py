@@ -293,6 +293,12 @@ class MathJEPAReadout(nn.Module):
         self.readout = ParallelReadoutDecoder(
             d_model, vocab_size, max_answer_len, num_layers=readout_layers, num_heads=num_heads
         )
+        self.reasoning_struct_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, 8 + 2 * TRACE_VALUE_CLASSES),
+        )
         if use_reasoning_trace:
             self.trace_predictor = CrossAttentionSequencePredictor(
                 d_model, num_slots, num_layers=predictor_layers, num_heads=num_heads
@@ -448,8 +454,11 @@ class MathJEPAReadout(nn.Module):
         trace_op_ids: torch.Tensor,
         trace_value_ids: torch.Tensor,
         trace_value_mask: torch.Tensor,
+        prefix: str = "trace_struct",
+        head: nn.Module | None = None,
     ) -> dict[str, torch.Tensor]:
-        pred = self.trace_struct_head(slots.mean(dim=1))
+        head = head or self.trace_struct_head
+        pred = head(slots.mean(dim=1))
         op_logits = pred[:, :8].view(-1, 2, 4)
         value_logits = pred[:, 8:].view(-1, 6, TRACE_VALUE_CLASSES)
         op_loss = F.cross_entropy(op_logits.reshape(-1, 4), trace_op_ids.reshape(-1))
@@ -466,10 +475,41 @@ class MathJEPAReadout(nn.Module):
         ).sum() / value_mask.sum().clamp(min=1.0)
         return {
             "loss": op_loss + value_loss,
-            "trace_struct_op_loss": op_loss,
-            "trace_struct_value_loss": value_loss,
-            "trace_struct_op_acc": op_acc,
-            "trace_struct_value_acc": value_acc,
+            f"{prefix}_op_loss": op_loss,
+            f"{prefix}_value_loss": value_loss,
+            f"{prefix}_op_acc": op_acc,
+            f"{prefix}_value_acc": value_acc,
+        }
+
+    def reasoning_struct_loss(
+        self,
+        slots: torch.Tensor,
+        trace_op_ids: torch.Tensor,
+        trace_value_ids: torch.Tensor,
+        trace_value_mask: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        pred = self.reasoning_struct_head(slots.mean(dim=1))
+        op_logits = pred[:, :8].view(-1, 2, 4)
+        value_logits = pred[:, 8:].view(-1, 2, TRACE_VALUE_CLASSES)
+        value_targets = trace_value_ids[:, [2, 5]]
+        value_mask = trace_value_mask[:, [2, 5]]
+        op_loss = F.cross_entropy(op_logits.reshape(-1, 4), trace_op_ids.reshape(-1))
+        per_value_loss = F.cross_entropy(
+            value_logits.reshape(-1, TRACE_VALUE_CLASSES),
+            value_targets.reshape(-1),
+            reduction="none",
+        ).view_as(value_mask)
+        value_loss = (per_value_loss * value_mask).sum() / value_mask.sum().clamp(min=1.0)
+        op_acc = (op_logits.argmax(dim=-1) == trace_op_ids).float().mean()
+        value_acc = (
+            (value_logits.argmax(dim=-1) == value_targets).float() * value_mask
+        ).sum() / value_mask.sum().clamp(min=1.0)
+        return {
+            "loss": op_loss + value_loss,
+            "reasoning_struct_op_loss": op_loss,
+            "reasoning_struct_value_loss": value_loss,
+            "reasoning_struct_op_acc": op_acc,
+            "reasoning_struct_value_acc": value_acc,
         }
 
     def structured_answer_loss(
@@ -561,6 +601,7 @@ class MathJEPAReadout(nn.Module):
         answer_value_id: torch.Tensor | None = None,
         trace_weight: float = 0.5,
         trace_struct_weight: float = 1.0,
+        reasoning_struct_weight: float = 1.0,
         structured_answer_weight: float = 1.0,
         contrastive_weight: float = 0.1,
         vicreg_weight: float = 0.05,
@@ -598,6 +639,26 @@ class MathJEPAReadout(nn.Module):
             "raw_pred_slots": raw_pred_slots.detach(),
             "target_slots": target_slots.detach(),
         }
+        if (
+            trace_op_ids is not None
+            and trace_value_ids is not None
+            and trace_value_mask is not None
+        ):
+            reasoning_struct = self.reasoning_struct_loss(
+                pred_slots,
+                trace_op_ids,
+                trace_value_ids,
+                trace_value_mask,
+            )
+            result["loss"] = result["loss"] + reasoning_struct_weight * reasoning_struct["loss"]
+            result["reasoning_struct_op_loss"] = reasoning_struct["reasoning_struct_op_loss"]
+            result["reasoning_struct_value_loss"] = reasoning_struct[
+                "reasoning_struct_value_loss"
+            ]
+            result["reasoning_struct_op_acc"] = reasoning_struct["reasoning_struct_op_acc"]
+            result["reasoning_struct_value_acc"] = reasoning_struct[
+                "reasoning_struct_value_acc"
+            ]
         if self.use_reasoning_trace and trace_ids is not None:
             if trace_pred_slots is None:
                 trace_pred_slots = self.predict_trace_slots(problem_ids, math_ids)
@@ -653,6 +714,7 @@ class MathJEPAReadout(nn.Module):
         answer_value_id: torch.Tensor | None = None,
         trace_weight: float = 0.5,
         trace_struct_weight: float = 1.0,
+        reasoning_struct_weight: float = 1.0,
         structured_answer_weight: float = 1.0,
         true_latent_ratio: float = 0.5,
         target_readout_weight: float = 1.0,
@@ -695,6 +757,7 @@ class MathJEPAReadout(nn.Module):
         length_weight: float = 0.1,
         trace_weight: float = 0.5,
         trace_struct_weight: float = 1.0,
+        reasoning_struct_weight: float = 1.0,
         structured_answer_weight: float = 1.0,
         slot_diversity_weight: float = 0.1,
         batch_diversity_weight: float = 0.5,
@@ -711,6 +774,7 @@ class MathJEPAReadout(nn.Module):
             answer_value_id=answer_value_id,
             trace_weight=trace_weight,
             trace_struct_weight=trace_struct_weight,
+            reasoning_struct_weight=reasoning_struct_weight,
             structured_answer_weight=structured_answer_weight,
             contrastive_weight=contrastive_weight,
             vicreg_weight=vicreg_weight,
@@ -763,6 +827,10 @@ class MathJEPAReadout(nn.Module):
             "trace_struct_value_loss",
             "trace_struct_op_acc",
             "trace_struct_value_acc",
+            "reasoning_struct_op_loss",
+            "reasoning_struct_value_loss",
+            "reasoning_struct_op_acc",
+            "reasoning_struct_value_acc",
             "structured_answer_loss",
             "structured_answer_acc",
         ]:
@@ -823,6 +891,10 @@ class MathJEPAReadout(nn.Module):
             "trace_struct_value_loss",
             "trace_struct_op_acc",
             "trace_struct_value_acc",
+            "reasoning_struct_op_loss",
+            "reasoning_struct_value_loss",
+            "reasoning_struct_op_acc",
+            "reasoning_struct_value_acc",
             "structured_answer_loss",
             "structured_answer_acc",
         ]:
@@ -838,6 +910,16 @@ class MathJEPAReadout(nn.Module):
         pred = self.trace_struct_head(slots.mean(dim=1))
         op_ids = pred[:, :8].view(-1, 2, 4).argmax(dim=-1)
         value_ids = pred[:, 8:].view(-1, 6, TRACE_VALUE_CLASSES).argmax(dim=-1)
+        return op_ids, value_ids
+
+    @torch.no_grad()
+    def predict_reasoning_struct(
+        self, problem_ids: torch.Tensor, math_ids: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        slots = self.predict_answer_slots(problem_ids, math_ids)
+        pred = self.reasoning_struct_head(slots.mean(dim=1))
+        op_ids = pred[:, :8].view(-1, 2, 4).argmax(dim=-1)
+        value_ids = pred[:, 8:].view(-1, 2, TRACE_VALUE_CLASSES).argmax(dim=-1)
         return op_ids, value_ids
 
     @torch.no_grad()

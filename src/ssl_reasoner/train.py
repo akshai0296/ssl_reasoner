@@ -266,6 +266,7 @@ def run_stage(
                     answer_value_id=answer_value_id,
                     trace_weight=args.trace_weight,
                     trace_struct_weight=args.trace_struct_weight,
+                    reasoning_struct_weight=args.reasoning_struct_weight,
                     structured_answer_weight=args.structured_answer_weight,
                     contrastive_weight=args.contrastive_weight,
                     vicreg_weight=args.vicreg_weight,
@@ -302,6 +303,7 @@ def run_stage(
                     length_weight=args.joint_length_weight,
                     trace_weight=args.trace_weight,
                     trace_struct_weight=args.trace_struct_weight,
+                    reasoning_struct_weight=args.reasoning_struct_weight,
                     structured_answer_weight=args.structured_answer_weight,
                     slot_diversity_weight=args.slot_diversity_weight,
                     batch_diversity_weight=args.batch_diversity_weight,
@@ -339,6 +341,8 @@ def run_stage(
                     or key in {
                         "trace_struct_op_acc",
                         "trace_struct_value_acc",
+                        "reasoning_struct_op_acc",
+                        "reasoning_struct_value_acc",
                         "structured_answer_acc",
                     }
                 )
@@ -454,6 +458,7 @@ def main() -> None:
     parser.add_argument("--target-readout-weight", type=float, default=1.0)
     parser.add_argument("--trace-weight", type=float, default=0.5)
     parser.add_argument("--trace-struct-weight", type=float, default=1.0)
+    parser.add_argument("--reasoning-struct-weight", type=float, default=0.1)
     parser.add_argument("--structured-answer-weight", type=float, default=1.0)
     parser.add_argument("--joint-pred-weight", type=float, default=1.0)
     parser.add_argument("--joint-contrastive-weight", type=float, default=0.1)
@@ -569,8 +574,10 @@ def main() -> None:
             matched = load_matching_state_dict(model, checkpoint["model"])
             print(f"partially loaded checkpoint={args.checkpoint} tensors={matched}")
         else:
-            model.load_state_dict(checkpoint["model"])
+            missing, unexpected = model.load_state_dict(checkpoint["model"], strict=False)
             print(f"loaded checkpoint={args.checkpoint}")
+            if missing or unexpected:
+                print(f"checkpoint_non_strict missing={len(missing)} unexpected={len(unexpected)}")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -610,7 +617,12 @@ def main() -> None:
         _set_trainable(model.predictor, True)
         _set_trainable(model.target_encoder, False)
         _set_trainable(model.readout, False)
-        stage1_params = list(model.problem_encoder.parameters()) + list(model.predictor.parameters())
+        _set_trainable(model.reasoning_struct_head, True)
+        stage1_params = (
+            list(model.problem_encoder.parameters())
+            + list(model.predictor.parameters())
+            + list(model.reasoning_struct_head.parameters())
+        )
         if args.use_math_features:
             stage1_params += list(model.math_embed.parameters())
             stage1_params += [model.math_pos_embed]
@@ -656,6 +668,7 @@ def main() -> None:
         _set_trainable(model.predictor, False)
         _set_trainable(model.target_encoder, False)
         _set_trainable(model.readout, True)
+        _set_trainable(model.reasoning_struct_head, False)
         if args.use_reasoning_trace:
             _set_trainable(model.trace_target_encoder, False)
             _set_trainable(model.trace_predictor, False)
@@ -688,10 +701,12 @@ def main() -> None:
         _set_trainable(model.predictor, True)
         _set_trainable(model.target_encoder, False)
         _set_trainable(model.readout, True)
+        _set_trainable(model.reasoning_struct_head, True)
         stage3_params = (
             list(model.problem_encoder.parameters())
             + list(model.predictor.parameters())
             + list(model.readout.parameters())
+            + list(model.reasoning_struct_head.parameters())
         )
         if args.use_math_features:
             stage3_params += list(model.math_embed.parameters())

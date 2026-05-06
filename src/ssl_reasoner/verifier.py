@@ -50,7 +50,7 @@ def load_reasoner(checkpoint_path: str, device: torch.device) -> tuple[MathJEPAR
         max_trace_len=args.get("max_trace_len", 32),
         use_trace_fusion=args.get("use_trace_fusion", False),
     ).to(device)
-    model.load_state_dict(ckpt["model"])
+    model.load_state_dict(ckpt["model"], strict=False)
     model.eval()
     for param in model.parameters():
         param.requires_grad = False
@@ -93,6 +93,18 @@ def model_candidate_texts(
     max_answer_len = batch["answer_ids"].size(1)
 
     if model.use_reasoning_trace:
+        _, reasoning_value_ids = model.predict_reasoning_struct(
+            problem_ids, math_ids=math_ids
+        )
+        reasoning_texts = [
+            str(class_to_value(int(idx)))
+            for idx in reasoning_value_ids[:, -1].detach().cpu().tolist()
+        ]
+        candidate_slots.append(
+            encode_answer_strings(model, tokenizer, reasoning_texts, max_answer_len, device)
+        )
+        candidate_texts.append(reasoning_texts)
+
         structured_ids, _ = model.predict_structured_answer(problem_ids, math_ids=math_ids)
         structured_texts = [
             str(class_to_value(int(idx))) for idx in structured_ids.detach().cpu().tolist()

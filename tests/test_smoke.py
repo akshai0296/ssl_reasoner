@@ -195,6 +195,7 @@ def test_reasoning_trace_forward():
     )
     decoded_trace = model.solve_trace_ids(problem_ids, pad_id=tokenizer.pad_id, math_ids=math_ids)
     pred_ops, pred_values = model.predict_structured_trace(problem_ids, math_ids=math_ids)
+    reason_ops, reason_values = model.predict_reasoning_struct(problem_ids, math_ids=math_ids)
     answer_pred, answer_conf = model.predict_structured_answer(problem_ids, math_ids=math_ids)
 
     assert out["loss"].ndim == 0
@@ -204,6 +205,8 @@ def test_reasoning_trace_forward():
     assert len(decoded_trace) == 4
     assert pred_ops.shape == (4, 2)
     assert pred_values.shape == (4, 6)
+    assert reason_ops.shape == (4, 2)
+    assert reason_values.shape == (4, 2)
     assert answer_pred.shape == (4,)
     assert answer_conf.shape == (4,)
 
@@ -288,6 +291,8 @@ def test_stage3_joint_forward():
     assert out["pred_loss"].ndim == 0
     assert out["token_loss"].ndim == 0
     assert out["length_loss"].ndim == 0
+    assert out["reasoning_struct_op_loss"].ndim == 0
+    assert out["reasoning_struct_value_loss"].ndim == 0
     assert out["pred_slots"].shape == (4, 8, 128)
 
 

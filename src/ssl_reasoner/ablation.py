@@ -134,7 +134,7 @@ def main() -> None:
         max_trace_len=train_args.get("max_trace_len", 32),
         use_trace_fusion=train_args.get("use_trace_fusion", False),
     ).to(device)
-    model.load_state_dict(ckpt["model"])
+    model.load_state_dict(ckpt["model"], strict=False)
 
     eval_dataset = MathDataset(
         generate_math_examples(args.samples, seed=args.seed, curriculum=args.curriculum),
