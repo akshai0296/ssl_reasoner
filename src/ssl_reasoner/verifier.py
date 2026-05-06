@@ -7,7 +7,13 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from .data import CURRICULA, MATH_FEATURE_VOCAB_SIZE, MathDataset, generate_math_examples
+from .data import (
+    CURRICULA,
+    MATH_FEATURE_VOCAB_SIZE,
+    MathDataset,
+    class_to_value,
+    generate_math_examples,
+)
 from .model import LatentVerifier, MathJEPAReadout
 from .tokenizer import build_math_tokenizer
 
@@ -52,6 +58,70 @@ def load_reasoner(checkpoint_path: str, device: torch.device) -> tuple[MathJEPAR
 
 
 @torch.no_grad()
+def encode_answer_strings(
+    model: MathJEPAReadout,
+    tokenizer,
+    texts: list[str],
+    max_answer_len: int,
+    device: torch.device,
+) -> torch.Tensor:
+    ids = torch.tensor(
+        [tokenizer.encode(text, max_answer_len) for text in texts],
+        dtype=torch.long,
+        device=device,
+    )
+    return model.encode_target(ids, use_ema=True)
+
+
+@torch.no_grad()
+def model_candidate_texts(
+    model: MathJEPAReadout,
+    tokenizer,
+    batch: dict,
+    device: torch.device,
+    noise_scale: float,
+    noise_candidates: int,
+) -> tuple[list[torch.Tensor], list[list[str]]]:
+    problem_ids = batch["problem_ids"].to(device)
+    math_ids = batch["math_ids"].to(device)
+    base_slots = model.predict_answer_slots(problem_ids, math_ids)
+    base_ids = model.readout.decode_ids(base_slots, pad_id=tokenizer.pad_id)
+    base_texts = [tokenizer.decode(ids).strip() for ids in base_ids]
+
+    candidate_slots = [base_slots]
+    candidate_texts = [base_texts]
+    max_answer_len = batch["answer_ids"].size(1)
+
+    if model.use_reasoning_trace:
+        structured_ids, _ = model.predict_structured_answer(problem_ids, math_ids=math_ids)
+        structured_texts = [
+            str(class_to_value(int(idx))) for idx in structured_ids.detach().cpu().tolist()
+        ]
+        candidate_slots.append(
+            encode_answer_strings(model, tokenizer, structured_texts, max_answer_len, device)
+        )
+        candidate_texts.append(structured_texts)
+
+        _, trace_value_ids = model.predict_structured_trace(problem_ids, math_ids=math_ids)
+        trace_texts = [
+            str(class_to_value(int(idx))) for idx in trace_value_ids[:, -1].detach().cpu().tolist()
+        ]
+        candidate_slots.append(
+            encode_answer_strings(model, tokenizer, trace_texts, max_answer_len, device)
+        )
+        candidate_texts.append(trace_texts)
+
+    for _ in range(noise_candidates):
+        noisy_slots = base_slots + noise_scale * torch.randn_like(base_slots)
+        noisy_ids = model.readout.decode_ids(noisy_slots, pad_id=tokenizer.pad_id)
+        noisy_texts = [tokenizer.decode(ids).strip() for ids in noisy_ids]
+        candidate_slots.append(noisy_slots)
+        candidate_texts.append(noisy_texts)
+
+    return candidate_slots, candidate_texts
+
+
+@torch.no_grad()
 def verifier_batch(
     model: MathJEPAReadout,
     tokenizer,
@@ -63,30 +133,32 @@ def verifier_batch(
     answer_ids = batch["answer_ids"].to(device)
     math_ids = batch["math_ids"].to(device)
     context = model.encode_context(problem_ids)
-    pred_slots = model.predict_answer_slots(problem_ids, math_ids)
     true_slots = model.encode_target(answer_ids, use_ema=True)
     wrong_slots = true_slots.roll(shifts=1, dims=0)
-    noisy_slots = pred_slots + noise_scale * torch.randn_like(pred_slots)
-    pred_ids = model.readout.decode_ids(pred_slots, pad_id=tokenizer.pad_id)
-    pred_labels = torch.tensor(
-        [
-            float(tokenizer.decode(ids).strip() == answer)
-            for ids, answer in zip(pred_ids, batch["answer"])
-        ],
-        device=device,
+    candidate_slots, candidate_texts = model_candidate_texts(
+        model,
+        tokenizer,
+        batch,
+        device,
+        noise_scale=noise_scale,
+        noise_candidates=1,
     )
 
-    contexts = torch.cat([context, context, context, context], dim=0)
-    candidates = torch.cat([true_slots, pred_slots, wrong_slots, noisy_slots], dim=0)
-    labels = torch.cat(
-        [
-            torch.ones(context.size(0), device=device),
-            pred_labels,
-            torch.zeros(context.size(0), device=device),
-            torch.zeros(context.size(0), device=device),
-        ],
-        dim=0,
-    )
+    contexts = [context, context]
+    candidates = [true_slots, wrong_slots]
+    labels = [torch.ones(context.size(0), device=device), torch.zeros(context.size(0), device=device)]
+    for slots, texts in zip(candidate_slots, candidate_texts):
+        contexts.append(context)
+        candidates.append(slots)
+        labels.append(
+            torch.tensor(
+                [float(text == answer) for text, answer in zip(texts, batch["answer"])],
+                device=device,
+            )
+        )
+    contexts = torch.cat(contexts, dim=0)
+    candidates = torch.cat(candidates, dim=0)
+    labels = torch.cat(labels, dim=0)
     return contexts, candidates, labels
 
 

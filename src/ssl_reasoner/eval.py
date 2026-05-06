@@ -14,6 +14,7 @@ from .data import (
 )
 from .model import LatentVerifier, MathJEPAReadout
 from .tokenizer import build_math_tokenizer
+from .verifier import model_candidate_texts
 
 
 def _device(name: str) -> torch.device:
@@ -171,14 +172,15 @@ def main() -> None:
                 assert verifier is not None
                 problem_ids = batch["problem_ids"].to(device)
                 math_ids = batch["math_ids"].to(device)
-                base_slots = model.predict_answer_slots(problem_ids, math_ids)
                 contexts = model.encode_context(problem_ids)
-                candidates = [base_slots]
-                for _ in range(max(args.verifier_candidates - 1, 0)):
-                    candidates.append(
-                        base_slots
-                        + args.verifier_noise_scale * torch.randn_like(base_slots)
-                    )
+                candidates, candidate_texts = model_candidate_texts(
+                    model,
+                    tokenizer,
+                    batch,
+                    device,
+                    noise_scale=args.verifier_noise_scale,
+                    noise_candidates=max(args.verifier_candidates - 3, 0),
+                )
                 stacked = torch.stack(candidates, dim=1)
                 flat_slots = stacked.flatten(0, 1)
                 flat_contexts = contexts.unsqueeze(1).expand(
@@ -188,9 +190,10 @@ def main() -> None:
                     contexts.size(0), stacked.size(1)
                 )
                 best_idx = scores.argmax(dim=1)
-                best_slots = stacked[torch.arange(stacked.size(0), device=device), best_idx]
-                decoded = model.readout.decode_ids(best_slots, pad_id=tokenizer.pad_id)
-                predictions = [tokenizer.decode(ids).strip() for ids in decoded]
+                predictions = [
+                    candidate_texts[int(idx)][row]
+                    for row, idx in enumerate(best_idx.detach().cpu().tolist())
+                ]
                 references = batch["answer"]
                 for problem, pred, answer, op_label, split_label in zip(
                     batch["problem"],
