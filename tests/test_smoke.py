@@ -19,6 +19,8 @@ def test_forward_shapes():
 
     assert out["loss"].ndim == 0
     assert out["pred_slots"].shape == (4, 8, 128)
+    assert out["slot_diversity_loss"].ndim == 0
+    assert out["batch_diversity_loss"].ndim == 0
     decoded = model.solve_ids(problem_ids, pad_id=tokenizer.pad_id)
     assert len(decoded) == 4
 

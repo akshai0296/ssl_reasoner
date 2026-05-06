@@ -111,6 +111,8 @@ def run_stage(
                     answer_ids,
                     contrastive_weight=args.contrastive_weight,
                     vicreg_weight=args.vicreg_weight,
+                    slot_diversity_weight=args.slot_diversity_weight,
+                    batch_diversity_weight=args.batch_diversity_weight,
                 )
             elif name == "stage2_readout":
                 progress = step / max(steps - 1, 1)
@@ -176,8 +178,10 @@ def main() -> None:
     parser.add_argument("--overfit", action="store_true")
     parser.add_argument("--eval-every", type=int, default=50)
     parser.add_argument("--sample-count", type=int, default=5)
-    parser.add_argument("--contrastive-weight", type=float, default=0.1)
+    parser.add_argument("--contrastive-weight", type=float, default=0.5)
     parser.add_argument("--vicreg-weight", type=float, default=0.05)
+    parser.add_argument("--slot-diversity-weight", type=float, default=0.1)
+    parser.add_argument("--batch-diversity-weight", type=float, default=0.5)
     parser.add_argument("--ema-decay", type=float, default=0.996)
     parser.add_argument("--true-latent-ratio", type=float, default=1.0)
     parser.add_argument(

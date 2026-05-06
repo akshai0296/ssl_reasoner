@@ -180,8 +180,8 @@ class MathJEPAReadout(nn.Module):
 
     @staticmethod
     def info_nce_loss(pred_slots: torch.Tensor, target_slots: torch.Tensor, temp: float = 0.07):
-        pred = F.normalize(pred_slots.mean(dim=1), dim=-1)
-        target = F.normalize(target_slots.mean(dim=1), dim=-1)
+        pred = F.normalize(pred_slots.flatten(start_dim=1), dim=-1)
+        target = F.normalize(target_slots.flatten(start_dim=1), dim=-1)
         logits = pred @ target.T / temp
         labels = torch.arange(logits.size(0), device=logits.device)
         return (F.cross_entropy(logits, labels) + F.cross_entropy(logits.T, labels)) / 2
@@ -196,6 +196,26 @@ class MathJEPAReadout(nn.Module):
         off_diag = cov - torch.diag(torch.diag(cov))
         cov_loss = off_diag.pow(2).sum() / x.size(1)
         return var_loss + cov_loss
+
+    @staticmethod
+    def slot_diversity_loss(slots: torch.Tensor) -> torch.Tensor:
+        """Penalize slots within each example becoming near-identical."""
+        normed = F.normalize(slots, dim=-1)
+        cosine = normed @ normed.transpose(1, 2)
+        eye = torch.eye(cosine.size(1), dtype=torch.bool, device=cosine.device).unsqueeze(0)
+        off_diag = cosine.masked_select(~eye)
+        return off_diag.pow(2).mean()
+
+    @staticmethod
+    def batch_diversity_loss(slots: torch.Tensor) -> torch.Tensor:
+        """Penalize different examples having overly similar pooled latents."""
+        pooled = F.normalize(slots.mean(dim=1), dim=-1)
+        cosine = pooled @ pooled.T
+        if cosine.size(0) <= 1:
+            return cosine.new_tensor(0.0)
+        eye = torch.eye(cosine.size(0), dtype=torch.bool, device=cosine.device)
+        off_diag = cosine.masked_select(~eye)
+        return off_diag.pow(2).mean()
 
     def stage0_target_autoencode(
         self,
@@ -217,6 +237,8 @@ class MathJEPAReadout(nn.Module):
         answer_ids: torch.Tensor,
         contrastive_weight: float = 0.1,
         vicreg_weight: float = 0.05,
+        slot_diversity_weight: float = 0.1,
+        batch_diversity_weight: float = 0.5,
     ) -> dict[str, torch.Tensor]:
         pred_slots = self.predict_slots(problem_ids)
         with torch.no_grad():
@@ -224,12 +246,22 @@ class MathJEPAReadout(nn.Module):
         pred_loss = F.smooth_l1_loss(pred_slots, target_slots)
         contrastive_loss = self.info_nce_loss(pred_slots, target_slots)
         vicreg = self.vicreg_loss(pred_slots)
-        loss = pred_loss + contrastive_weight * contrastive_loss + vicreg_weight * vicreg
+        diversity_loss = self.slot_diversity_loss(pred_slots)
+        batch_diversity = self.batch_diversity_loss(pred_slots)
+        loss = (
+            pred_loss
+            + contrastive_weight * contrastive_loss
+            + vicreg_weight * vicreg
+            + slot_diversity_weight * diversity_loss
+            + batch_diversity_weight * batch_diversity
+        )
         return {
             "loss": loss,
             "pred_loss": pred_loss,
             "contrastive_loss": contrastive_loss,
             "vicreg_loss": vicreg,
+            "slot_diversity_loss": diversity_loss,
+            "batch_diversity_loss": batch_diversity,
             "pred_slots": pred_slots.detach(),
             "target_slots": target_slots.detach(),
         }
@@ -263,6 +295,8 @@ class MathJEPAReadout(nn.Module):
             "pred_loss": pred_out["pred_loss"],
             "contrastive_loss": pred_out["contrastive_loss"],
             "vicreg_loss": pred_out["vicreg_loss"],
+            "slot_diversity_loss": pred_out["slot_diversity_loss"],
+            "batch_diversity_loss": pred_out["batch_diversity_loss"],
             "token_loss": dec_out["token_loss"],
             "length_loss": dec_out["length_loss"],
             "pred_slots": pred_out["pred_slots"],
