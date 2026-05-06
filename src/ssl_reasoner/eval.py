@@ -5,7 +5,7 @@ import argparse
 import torch
 from torch.utils.data import DataLoader
 
-from .data import MATH_FEATURE_VOCAB_SIZE, MathDataset, generate_math_examples
+from .data import MATH_FEATURE_VOCAB_SIZE, MathDataset, class_to_value, generate_math_examples
 from .model import MathJEPAReadout
 from .tokenizer import build_math_tokenizer
 
@@ -28,8 +28,18 @@ def main() -> None:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument(
-        "--mode", choices=["pred", "target", "trace", "trace_struct"], default="pred"
+        "--mode",
+        choices=[
+            "pred",
+            "target",
+            "trace",
+            "trace_struct",
+            "structured_answer",
+            "fallback",
+        ],
+        default="pred",
     )
+    parser.add_argument("--fallback-confidence", type=float, default=0.8)
     parser.add_argument(
         "--curriculum",
         choices=["mixed", "single_op_balanced", "mixed_only"],
@@ -94,6 +104,42 @@ def main() -> None:
                 counts = by_op.setdefault("value_acc", [0, 0])
                 counts[0] += value_correct
                 counts[1] += value_total
+                continue
+            if args.mode in {"structured_answer", "fallback"}:
+                pred_ids, confidence = model.predict_structured_answer(
+                    batch["problem_ids"].to(device),
+                    math_ids=batch["math_ids"].to(device),
+                )
+                structured_predictions = [str(class_to_value(int(idx))) for idx in pred_ids.tolist()]
+                if args.mode == "structured_answer":
+                    predictions = structured_predictions
+                else:
+                    decoded = model.solve_ids(
+                        batch["problem_ids"].to(device),
+                        pad_id=tokenizer.pad_id,
+                        math_ids=batch["math_ids"].to(device),
+                    )
+                    readout_predictions = [tokenizer.decode(ids).strip() for ids in decoded]
+                    predictions = [
+                        structured if float(conf) >= args.fallback_confidence else readout
+                        for structured, readout, conf in zip(
+                            structured_predictions, readout_predictions, confidence
+                        )
+                    ]
+                references = batch["answer"]
+                for problem, pred, answer, op_label in zip(
+                    batch["problem"], predictions, references, batch["op_label"]
+                ):
+                    is_correct = pred == answer
+                    correct += is_correct
+                    total += 1
+                    counts = by_op.setdefault(str(op_label), [0, 0])
+                    counts[0] += int(is_correct)
+                    counts[1] += 1
+                    if shown < 10:
+                        mark = "ok" if is_correct else "bad"
+                        print(f"{mark}: {problem} -> pred={pred!r} target={answer!r}")
+                        shown += 1
                 continue
             if args.mode == "pred":
                 decoded = model.solve_ids(

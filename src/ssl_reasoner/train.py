@@ -133,6 +133,25 @@ def evaluate_structured_trace(model, dataset, device, batch_size: int) -> dict[s
 
 
 @torch.no_grad()
+def evaluate_structured_answer(model, dataset, device, batch_size: int) -> float:
+    if not model.use_reasoning_trace:
+        return 0.0
+    model.eval()
+    loader = DataLoader(dataset, batch_size=batch_size)
+    correct = 0
+    total = 0
+    for batch in loader:
+        pred_ids, _ = model.predict_structured_answer(
+            batch["problem_ids"].to(device),
+            math_ids=batch["math_ids"].to(device),
+        )
+        target_ids = batch["answer_value_id"].to(device)
+        correct += int((pred_ids == target_ids).sum().item())
+        total += int(target_ids.numel())
+    return correct / max(total, 1)
+
+
+@torch.no_grad()
 def format_samples(
     model,
     dataset,
@@ -215,6 +234,7 @@ def run_stage(
             trace_op_ids = batch["trace_op_ids"].to(device)
             trace_value_ids = batch["trace_value_ids"].to(device)
             trace_value_mask = batch["trace_value_mask"].to(device)
+            answer_value_id = batch["answer_value_id"].to(device)
 
             if name == "stage0_target_warmup":
                 out = model.stage0_target_autoencode(
@@ -234,8 +254,10 @@ def run_stage(
                     trace_op_ids=trace_op_ids,
                     trace_value_ids=trace_value_ids,
                     trace_value_mask=trace_value_mask,
+                    answer_value_id=answer_value_id,
                     trace_weight=args.trace_weight,
                     trace_struct_weight=args.trace_struct_weight,
+                    structured_answer_weight=args.structured_answer_weight,
                     contrastive_weight=args.contrastive_weight,
                     vicreg_weight=args.vicreg_weight,
                     slot_diversity_weight=args.slot_diversity_weight,
@@ -275,17 +297,26 @@ def run_stage(
                 )
                 trace_acc = evaluate_trace(model, val_dataset, tokenizer, device, batch_size)
                 trace_struct = evaluate_structured_trace(model, val_dataset, device, batch_size)
+                structured_answer_acc = evaluate_structured_answer(
+                    model, val_dataset, device, batch_size
+                )
                 metrics = " ".join(
                     f"{key}={value.item():.4f}"
                     for key, value in out.items()
-                    if key.endswith("loss") or key in {"trace_struct_op_acc", "trace_struct_value_acc"}
+                    if key.endswith("loss")
+                    or key in {
+                        "trace_struct_op_acc",
+                        "trace_struct_value_acc",
+                        "structured_answer_acc",
+                    }
                 )
                 print(
                     f"{name} step={step} {metrics} "
                     f"pred_exact={pred_acc:.3f} target_exact={target_acc:.3f} "
                     f"trace_exact={trace_acc:.3f} "
                     f"trace_struct_op_acc={trace_struct['trace_struct_op_acc']:.3f} "
-                    f"trace_struct_value_acc={trace_struct['trace_struct_value_acc']:.3f}"
+                    f"trace_struct_value_acc={trace_struct['trace_struct_value_acc']:.3f} "
+                    f"structured_answer_acc={structured_answer_acc:.3f}"
                 )
                 op_metrics = " ".join(
                     f"{key}={value:.3f}"
@@ -372,6 +403,7 @@ def main() -> None:
     parser.add_argument("--target-readout-weight", type=float, default=1.0)
     parser.add_argument("--trace-weight", type=float, default=0.5)
     parser.add_argument("--trace-struct-weight", type=float, default=1.0)
+    parser.add_argument("--structured-answer-weight", type=float, default=1.0)
     parser.add_argument(
         "--stages",
         default="0,1,2",
@@ -517,8 +549,10 @@ def main() -> None:
             _set_trainable(model.trace_readout, False)
             _set_trainable(model.trace_predictor, True)
             _set_trainable(model.trace_struct_head, True)
+            _set_trainable(model.structured_answer_head, True)
             stage1_params += list(model.trace_predictor.parameters())
             stage1_params += list(model.trace_struct_head.parameters())
+            stage1_params += list(model.structured_answer_head.parameters())
             if args.use_trace_fusion:
                 _set_trainable(model.trace_struct_summary, True)
                 _set_trainable(model.trace_fusion, True)
@@ -556,6 +590,7 @@ def main() -> None:
             _set_trainable(model.trace_predictor, False)
             _set_trainable(model.trace_readout, False)
             _set_trainable(model.trace_struct_head, False)
+            _set_trainable(model.structured_answer_head, False)
             if args.use_trace_fusion:
                 _set_trainable(model.trace_struct_summary, False)
                 _set_trainable(model.trace_fusion, False)

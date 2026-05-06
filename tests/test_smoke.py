@@ -125,6 +125,7 @@ def test_reasoning_trace_forward():
     trace_op_ids = torch.stack([item["trace_op_ids"] for item in batch])
     trace_value_ids = torch.stack([item["trace_value_ids"] for item in batch])
     trace_value_mask = torch.stack([item["trace_value_mask"] for item in batch])
+    answer_value_id = torch.stack([item["answer_value_id"] for item in batch])
 
     model = MathJEPAReadout(
         vocab_size=tokenizer.vocab_size,
@@ -142,9 +143,11 @@ def test_reasoning_trace_forward():
         trace_op_ids=trace_op_ids,
         trace_value_ids=trace_value_ids,
         trace_value_mask=trace_value_mask,
+        answer_value_id=answer_value_id,
     )
     decoded_trace = model.solve_trace_ids(problem_ids, pad_id=tokenizer.pad_id, math_ids=math_ids)
     pred_ops, pred_values = model.predict_structured_trace(problem_ids, math_ids=math_ids)
+    answer_pred, answer_conf = model.predict_structured_answer(problem_ids, math_ids=math_ids)
 
     assert out["loss"].ndim == 0
     assert out["pred_slots"].shape == (4, 8, 128)
@@ -153,6 +156,8 @@ def test_reasoning_trace_forward():
     assert len(decoded_trace) == 4
     assert pred_ops.shape == (4, 2)
     assert pred_values.shape == (4, 6)
+    assert answer_pred.shape == (4,)
+    assert answer_conf.shape == (4,)
 
 
 def test_trace_fusion_forward():
@@ -168,6 +173,7 @@ def test_trace_fusion_forward():
     trace_op_ids = torch.stack([item["trace_op_ids"] for item in batch])
     trace_value_ids = torch.stack([item["trace_value_ids"] for item in batch])
     trace_value_mask = torch.stack([item["trace_value_mask"] for item in batch])
+    answer_value_id = torch.stack([item["answer_value_id"] for item in batch])
 
     model = MathJEPAReadout(
         vocab_size=tokenizer.vocab_size,
@@ -186,6 +192,7 @@ def test_trace_fusion_forward():
         trace_op_ids=trace_op_ids,
         trace_value_ids=trace_value_ids,
         trace_value_mask=trace_value_mask,
+        answer_value_id=answer_value_id,
     )
     decoded = model.solve_ids(problem_ids, pad_id=tokenizer.pad_id, math_ids=math_ids)
 

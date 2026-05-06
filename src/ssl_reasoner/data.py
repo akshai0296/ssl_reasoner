@@ -72,6 +72,14 @@ def _value_to_class(value: float) -> int:
     return int(max(TRACE_VALUE_MIN, min(TRACE_VALUE_MAX, int(value)))) - TRACE_VALUE_MIN
 
 
+def value_to_class(value: int | str) -> int:
+    return _value_to_class(float(value))
+
+
+def class_to_value(class_id: int) -> int:
+    return int(class_id) + TRACE_VALUE_MIN
+
+
 def make_trace_fields(expr: str) -> tuple[list[int], list[int], list[float]]:
     parts = re.split(r"([+\-*])", expr)
     if len(parts) == 3:
@@ -227,6 +235,7 @@ class MathDataset(Dataset):
             "trace_op_ids": torch.tensor(trace_op_ids, dtype=torch.long),
             "trace_value_ids": torch.tensor(trace_values, dtype=torch.long),
             "trace_value_mask": torch.tensor(trace_value_mask, dtype=torch.float),
+            "answer_value_id": torch.tensor(value_to_class(ex.answer), dtype=torch.long),
             "answer": ex.answer,
             "trace": ex.trace,
             "problem": ex.problem,
