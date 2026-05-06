@@ -30,7 +30,7 @@ def main() -> None:
     parser.add_argument("--mode", choices=["pred", "target"], default="pred")
     parser.add_argument(
         "--curriculum",
-        choices=["mixed", "single_op_balanced"],
+        choices=["mixed", "single_op_balanced", "mixed_only"],
         default="mixed",
     )
     args = parser.parse_args()

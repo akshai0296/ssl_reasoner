@@ -82,6 +82,9 @@ def generate_math_examples(
         elif curriculum == "single_op_balanced":
             difficulty = 0
             op = ops[idx % len(ops)]
+        elif curriculum == "mixed_only":
+            difficulty = 1
+            op = None
         else:
             raise ValueError(f"Unknown curriculum: {curriculum}")
         expr, value, op_label = _make_expression(rng, difficulty, op=op)

@@ -107,7 +107,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument(
         "--curriculum",
-        choices=["mixed", "single_op_balanced"],
+        choices=["mixed", "single_op_balanced", "mixed_only"],
         default="mixed",
     )
     args = parser.parse_args()

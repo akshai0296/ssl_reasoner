@@ -249,12 +249,12 @@ def main() -> None:
     parser.add_argument("--val-size", type=int, default=500)
     parser.add_argument(
         "--train-curriculum",
-        choices=["mixed", "single_op_balanced"],
+        choices=["mixed", "single_op_balanced", "mixed_only"],
         default="mixed",
     )
     parser.add_argument(
         "--val-curriculum",
-        choices=["mixed", "single_op_balanced"],
+        choices=["mixed", "single_op_balanced", "mixed_only"],
         default="mixed",
     )
     parser.add_argument("--batch-size", type=int, default=64)

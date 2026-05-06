@@ -68,6 +68,12 @@ def test_single_op_balanced_curriculum_cycles_operations():
     assert {example.difficulty for example in examples} == {0}
 
 
+def test_mixed_only_curriculum_uses_three_term_expressions():
+    examples = generate_math_examples(6, seed=0, curriculum="mixed_only")
+    assert {example.op_label for example in examples} == {"mixed"}
+    assert {example.difficulty for example in examples} == {1}
+
+
 def test_cross_attention_with_math_features_forward():
     tokenizer = build_math_tokenizer()
     dataset = MathDataset(generate_math_examples(4), tokenizer)
