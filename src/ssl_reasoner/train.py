@@ -207,6 +207,7 @@ def main() -> None:
     parser.add_argument("--max-answer-len", type=int, default=16)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--output-dir", default="checkpoints")
+    parser.add_argument("--checkpoint", default=None, help="Optional checkpoint to resume from.")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--overfit", action="store_true")
     parser.add_argument("--eval-every", type=int, default=50)
@@ -238,6 +239,13 @@ def main() -> None:
     torch.manual_seed(args.seed)
     device = _device(args.device)
     tokenizer = build_math_tokenizer()
+    checkpoint = torch.load(args.checkpoint, map_location=device) if args.checkpoint else None
+    if checkpoint is not None:
+        ckpt_args = checkpoint.get("args", {})
+        args.max_problem_len = ckpt_args.get("max_problem_len", args.max_problem_len)
+        args.max_answer_len = ckpt_args.get("max_answer_len", args.max_answer_len)
+        args.d_model = ckpt_args.get("d_model", args.d_model)
+        args.num_slots = ckpt_args.get("num_slots", args.num_slots)
 
     train_examples = generate_math_examples(args.train_size, seed=args.seed)
     val_examples = train_examples if args.overfit else generate_math_examples(args.val_size, seed=args.seed + 1)
@@ -252,6 +260,9 @@ def main() -> None:
         d_model=args.d_model,
         num_slots=args.num_slots,
     ).to(device)
+    if checkpoint is not None:
+        model.load_state_dict(checkpoint["model"])
+        print(f"loaded checkpoint={args.checkpoint}")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
