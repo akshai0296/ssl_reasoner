@@ -12,7 +12,7 @@ from .data import (
     class_to_value,
     generate_math_examples,
 )
-from .model import MathJEPAReadout
+from .model import LatentVerifier, MathJEPAReadout
 from .tokenizer import build_math_tokenizer
 
 
@@ -42,10 +42,14 @@ def main() -> None:
             "trace_struct",
             "structured_answer",
             "fallback",
+            "verifier",
         ],
         default="pred",
     )
     parser.add_argument("--fallback-confidence", type=float, default=0.8)
+    parser.add_argument("--verifier-checkpoint", default=None)
+    parser.add_argument("--verifier-candidates", type=int, default=8)
+    parser.add_argument("--verifier-noise-scale", type=float, default=0.15)
     parser.add_argument(
         "--curriculum",
         choices=CURRICULA,
@@ -77,6 +81,14 @@ def main() -> None:
     ).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
+    verifier = None
+    if args.mode == "verifier":
+        if args.verifier_checkpoint is None:
+            raise ValueError("--verifier-checkpoint is required for --mode verifier")
+        verifier_ckpt = torch.load(args.verifier_checkpoint, map_location=device)
+        verifier = LatentVerifier(train_args["d_model"]).to(device)
+        verifier.load_state_dict(verifier_ckpt["verifier"])
+        verifier.eval()
 
     dataset = MathDataset(
         generate_math_examples(args.samples, seed=args.seed, curriculum=args.curriculum),
@@ -133,6 +145,52 @@ def main() -> None:
                             structured_predictions, readout_predictions, confidence
                         )
                     ]
+                references = batch["answer"]
+                for problem, pred, answer, op_label, split_label in zip(
+                    batch["problem"],
+                    predictions,
+                    references,
+                    batch["op_label"],
+                    batch["split_label"],
+                ):
+                    is_correct = pred == answer
+                    correct += is_correct
+                    total += 1
+                    counts = by_op.setdefault(str(op_label), [0, 0])
+                    counts[0] += int(is_correct)
+                    counts[1] += 1
+                    split_counts = by_split.setdefault(str(split_label), [0, 0])
+                    split_counts[0] += int(is_correct)
+                    split_counts[1] += 1
+                    if shown < 10:
+                        mark = "ok" if is_correct else "bad"
+                        print(f"{mark}: {problem} -> pred={pred!r} target={answer!r}")
+                        shown += 1
+                continue
+            if args.mode == "verifier":
+                assert verifier is not None
+                problem_ids = batch["problem_ids"].to(device)
+                math_ids = batch["math_ids"].to(device)
+                base_slots = model.predict_answer_slots(problem_ids, math_ids)
+                contexts = model.encode_context(problem_ids)
+                candidates = [base_slots]
+                for _ in range(max(args.verifier_candidates - 1, 0)):
+                    candidates.append(
+                        base_slots
+                        + args.verifier_noise_scale * torch.randn_like(base_slots)
+                    )
+                stacked = torch.stack(candidates, dim=1)
+                flat_slots = stacked.flatten(0, 1)
+                flat_contexts = contexts.unsqueeze(1).expand(
+                    -1, stacked.size(1), -1
+                ).flatten(0, 1)
+                scores = verifier(flat_contexts, flat_slots).view(
+                    contexts.size(0), stacked.size(1)
+                )
+                best_idx = scores.argmax(dim=1)
+                best_slots = stacked[torch.arange(stacked.size(0), device=device), best_idx]
+                decoded = model.readout.decode_ids(best_slots, pad_id=tokenizer.pad_id)
+                predictions = [tokenizer.decode(ids).strip() for ids in decoded]
                 references = batch["answer"]
                 for problem, pred, answer, op_label, split_label in zip(
                     batch["problem"],

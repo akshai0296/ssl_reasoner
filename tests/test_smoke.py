@@ -10,7 +10,7 @@ from ssl_reasoner.data import (
     make_trace_fields,
 )
 from ssl_reasoner.diagnostics import latent_health
-from ssl_reasoner.model import MathJEPAReadout
+from ssl_reasoner.model import LatentVerifier, MathJEPAReadout
 from ssl_reasoner.tokenizer import build_math_tokenizer
 
 
@@ -289,3 +289,12 @@ def test_stage3_joint_forward():
     assert out["token_loss"].ndim == 0
     assert out["length_loss"].ndim == 0
     assert out["pred_slots"].shape == (4, 8, 128)
+
+
+def test_latent_verifier_forward():
+    verifier = LatentVerifier(d_model=128)
+    context = torch.randn(4, 128)
+    candidate_slots = torch.randn(4, 8, 128)
+    logits = verifier(context, candidate_slots)
+
+    assert logits.shape == (4,)

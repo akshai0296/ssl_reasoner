@@ -38,6 +38,18 @@ scripts/stage3_joint_from_structured_answer.sh
 The Stage 3 script uses a conservative low learning rate and standard mixed curriculum to
 avoid decoder drift while still updating the encoder, predictor, readout, and trace heads.
 
+Stage 4 trains the latent verifier on frozen Stage 3 latents:
+
+```bash
+scripts/stage4_verifier_from_stage3.sh
+```
+
+Evaluate verifier-ranked latent candidates with:
+
+```bash
+scripts/eval_stage4_verifier.sh
+```
+
 ## Evaluate a Checkpoint
 
 ```bash

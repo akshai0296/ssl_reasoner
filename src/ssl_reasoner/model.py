@@ -214,6 +214,27 @@ class ParallelReadoutDecoder(nn.Module):
         return decoded
 
 
+class LatentVerifier(nn.Module):
+    """Score whether a candidate answer latent is correct for a problem latent."""
+
+    def __init__(self, d_model: int, hidden_dim: int | None = None):
+        super().__init__()
+        hidden_dim = hidden_dim or d_model * 2
+        self.net = nn.Sequential(
+            nn.LayerNorm(d_model * 2),
+            nn.Linear(d_model * 2, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, context: torch.Tensor, candidate_slots: torch.Tensor) -> torch.Tensor:
+        candidate = candidate_slots.mean(dim=1)
+        features = torch.cat([context, candidate], dim=-1)
+        return self.net(features).squeeze(-1)
+
+
 class MathJEPAReadout(nn.Module):
     def __init__(
         self,
