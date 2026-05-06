@@ -405,6 +405,18 @@ def main() -> None:
         choices=CURRICULA,
         default="mixed",
     )
+    parser.add_argument(
+        "--train-easy-ratio",
+        type=float,
+        default=0.75,
+        help="For mixed curriculum, probability of single-op examples.",
+    )
+    parser.add_argument(
+        "--val-easy-ratio",
+        type=float,
+        default=0.75,
+        help="For mixed curriculum, probability of single-op validation examples.",
+    )
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--d-model", type=int, default=128)
@@ -501,13 +513,19 @@ def main() -> None:
             args.use_trace_fusion = ckpt_args.get("use_trace_fusion", args.use_trace_fusion)
 
     train_examples = generate_math_examples(
-        args.train_size, seed=args.seed, curriculum=args.train_curriculum
+        args.train_size,
+        seed=args.seed,
+        difficulty_mix=(args.train_easy_ratio, 1.0 - args.train_easy_ratio),
+        curriculum=args.train_curriculum,
     )
     val_examples = (
         train_examples
         if args.overfit
         else generate_math_examples(
-            args.val_size, seed=args.seed + 1, curriculum=args.val_curriculum
+            args.val_size,
+            seed=args.seed + 1,
+            difficulty_mix=(args.val_easy_ratio, 1.0 - args.val_easy_ratio),
+            curriculum=args.val_curriculum,
         )
     )
     train_dataset = MathDataset(

@@ -35,6 +35,9 @@ Stage 3 joint fine-tuning follows the plan's combined latent + readout objective
 scripts/stage3_joint_from_structured_answer.sh
 ```
 
+The Stage 3 script uses a conservative low learning rate and standard mixed curriculum to
+avoid decoder drift while still updating the encoder, predictor, readout, and trace heads.
+
 ## Evaluate a Checkpoint
 
 ```bash
