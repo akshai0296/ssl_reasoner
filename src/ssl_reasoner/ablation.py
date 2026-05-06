@@ -132,6 +132,7 @@ def main() -> None:
         max_math_len=train_args.get("max_math_len", 8),
         use_reasoning_trace=train_args.get("use_reasoning_trace", False),
         max_trace_len=train_args.get("max_trace_len", 32),
+        use_trace_fusion=train_args.get("use_trace_fusion", False),
     ).to(device)
     model.load_state_dict(ckpt["model"])
 

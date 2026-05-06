@@ -350,6 +350,7 @@ def main() -> None:
     parser.add_argument("--max-trace-len", type=int, default=32)
     parser.add_argument("--use-math-features", action="store_true")
     parser.add_argument("--use-reasoning-trace", action="store_true")
+    parser.add_argument("--use-trace-fusion", action="store_true")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--output-dir", default="checkpoints")
     parser.add_argument("--checkpoint", default=None, help="Optional checkpoint to resume from.")
@@ -410,6 +411,7 @@ def main() -> None:
             args.use_reasoning_trace = ckpt_args.get(
                 "use_reasoning_trace", args.use_reasoning_trace
             )
+            args.use_trace_fusion = ckpt_args.get("use_trace_fusion", args.use_trace_fusion)
 
     train_examples = generate_math_examples(
         args.train_size, seed=args.seed, curriculum=args.train_curriculum
@@ -455,6 +457,7 @@ def main() -> None:
         max_math_len=args.max_math_len,
         use_reasoning_trace=args.use_reasoning_trace,
         max_trace_len=args.max_trace_len,
+        use_trace_fusion=args.use_trace_fusion,
     ).to(device)
     if checkpoint is not None:
         if args.partial_checkpoint:
@@ -516,6 +519,11 @@ def main() -> None:
             _set_trainable(model.trace_struct_head, True)
             stage1_params += list(model.trace_predictor.parameters())
             stage1_params += list(model.trace_struct_head.parameters())
+            if args.use_trace_fusion:
+                _set_trainable(model.trace_struct_summary, True)
+                _set_trainable(model.trace_fusion, True)
+                stage1_params += list(model.trace_struct_summary.parameters())
+                stage1_params += list(model.trace_fusion.parameters())
         optimizer = torch.optim.AdamW(
             stage1_params,
             lr=args.lr,
@@ -548,6 +556,9 @@ def main() -> None:
             _set_trainable(model.trace_predictor, False)
             _set_trainable(model.trace_readout, False)
             _set_trainable(model.trace_struct_head, False)
+            if args.use_trace_fusion:
+                _set_trainable(model.trace_struct_summary, False)
+                _set_trainable(model.trace_fusion, False)
         optimizer = torch.optim.AdamW(model.readout.parameters(), lr=args.lr, weight_decay=0.01)
         best_acc = run_stage(
             name="stage2_readout",
