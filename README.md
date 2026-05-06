@@ -51,6 +51,12 @@ To train the predictor with reasoning supervision during Stage 1, then re-fit th
 scripts/predictor_reasoning_stage1.sh
 ```
 
+The current best math-only recipe uses a mixed-heavy Stage 1 curriculum:
+
+```bash
+scripts/predictor_reasoning_stage1_mixed_heavy.sh
+```
+
 Stage 4 trains the latent verifier on frozen Stage 3 latents:
 
 ```bash
