@@ -216,6 +216,7 @@ def main() -> None:
     parser.add_argument("--num-slots", type=int, default=8)
     parser.add_argument("--encoder-layers", type=int, default=2)
     parser.add_argument("--predictor-layers", type=int, default=3)
+    parser.add_argument("--predictor-type", choices=["pooled", "cross_attn"], default="pooled")
     parser.add_argument("--readout-layers", type=int, default=2)
     parser.add_argument("--num-heads", type=int, default=4)
     parser.add_argument("--max-problem-len", type=int, default=64)
@@ -271,6 +272,7 @@ def main() -> None:
         args.num_heads = ckpt_args.get("num_heads", args.num_heads)
         if not args.partial_checkpoint:
             args.predictor_layers = ckpt_args.get("predictor_layers", args.predictor_layers)
+            args.predictor_type = ckpt_args.get("predictor_type", args.predictor_type)
 
     train_examples = generate_math_examples(args.train_size, seed=args.seed)
     val_examples = train_examples if args.overfit else generate_math_examples(args.val_size, seed=args.seed + 1)
@@ -288,6 +290,7 @@ def main() -> None:
         predictor_layers=args.predictor_layers,
         readout_layers=args.readout_layers,
         num_heads=args.num_heads,
+        predictor_type=args.predictor_type,
     ).to(device)
     if checkpoint is not None:
         if args.partial_checkpoint:

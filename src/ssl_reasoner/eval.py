@@ -44,6 +44,7 @@ def main() -> None:
         predictor_layers=train_args.get("predictor_layers", 3),
         readout_layers=train_args.get("readout_layers", 2),
         num_heads=train_args.get("num_heads", 4),
+        predictor_type=train_args.get("predictor_type", "pooled"),
     ).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()

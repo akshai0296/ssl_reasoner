@@ -37,3 +37,18 @@ def test_latent_health_keys():
     assert "effective_rank_ratio" in stats
     assert "passes_cosine" in stats
     assert "passes_rank" in stats
+
+
+def test_cross_attention_predictor_forward():
+    tokenizer = build_math_tokenizer()
+    dataset = MathDataset(generate_math_examples(4), tokenizer)
+    batch = [dataset[i] for i in range(4)]
+    problem_ids = torch.stack([item["problem_ids"] for item in batch])
+    answer_ids = torch.stack([item["answer_ids"] for item in batch])
+    answer_len = torch.stack([item["answer_len"] for item in batch])
+
+    model = MathJEPAReadout(vocab_size=tokenizer.vocab_size, predictor_type="cross_attn")
+    out = model(problem_ids, answer_ids, answer_len)
+
+    assert out["loss"].ndim == 0
+    assert out["pred_slots"].shape == (4, 8, 128)

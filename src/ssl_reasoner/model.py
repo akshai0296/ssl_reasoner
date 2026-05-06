@@ -31,12 +31,18 @@ class MeanPoolEncoder(nn.Module):
         self.norm = nn.LayerNorm(d_model)
 
     def forward(self, ids: torch.Tensor, pad_id: int = 0) -> torch.Tensor:
+        encoded, mask = self.forward_sequence(ids, pad_id=pad_id)
+        denom = mask.sum(dim=1, keepdim=True).clamp(min=1).to(encoded.dtype)
+        pooled = (encoded * mask.unsqueeze(-1)).sum(dim=1) / denom
+        return self.norm(pooled)
+
+    def forward_sequence(
+        self, ids: torch.Tensor, pad_id: int = 0
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         mask = ids.ne(pad_id)
         x = self.token_embed(ids) + self.pos_embed[:, : ids.size(1)]
         x = self.encoder(x, src_key_padding_mask=~mask)
-        denom = mask.sum(dim=1, keepdim=True).clamp(min=1).to(x.dtype)
-        pooled = (x * mask.unsqueeze(-1)).sum(dim=1) / denom
-        return self.norm(pooled)
+        return self.norm(x), mask
 
 
 class SlotTargetEncoder(nn.Module):
@@ -102,6 +108,63 @@ class SequencePredictor(nn.Module):
         return self.norm(x[:, 1:])
 
 
+class CrossAttentionSequencePredictor(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_slots: int,
+        num_layers: int = 3,
+        num_heads: int = 4,
+    ):
+        super().__init__()
+        self.slot_queries = nn.Parameter(torch.randn(1, num_slots, d_model) * 0.02)
+        self.layers = nn.ModuleList(
+            [
+                nn.ModuleDict(
+                    {
+                        "cross": nn.MultiheadAttention(
+                            d_model, num_heads=num_heads, batch_first=True
+                        ),
+                        "self": nn.MultiheadAttention(
+                            d_model, num_heads=num_heads, batch_first=True
+                        ),
+                        "ff": nn.Sequential(
+                            nn.LayerNorm(d_model),
+                            nn.Linear(d_model, d_model * 4),
+                            nn.GELU(),
+                            nn.Linear(d_model * 4, d_model),
+                        ),
+                        "norm_cross": nn.LayerNorm(d_model),
+                        "norm_self": nn.LayerNorm(d_model),
+                    }
+                )
+                for _ in range(num_layers)
+            ]
+        )
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, context_tokens: torch.Tensor, context_mask: torch.Tensor) -> torch.Tensor:
+        slots = self.slot_queries.expand(context_tokens.size(0), -1, -1)
+        key_padding_mask = ~context_mask
+        for layer in self.layers:
+            residual = slots
+            cross_in = layer["norm_cross"](slots)
+            cross_out, _ = layer["cross"](
+                cross_in,
+                context_tokens,
+                context_tokens,
+                key_padding_mask=key_padding_mask,
+            )
+            slots = residual + cross_out
+
+            residual = slots
+            self_in = layer["norm_self"](slots)
+            self_out, _ = layer["self"](self_in, self_in, self_in)
+            slots = residual + self_out
+            slots = slots + layer["ff"](slots)
+        return self.norm(slots)
+
+
 class ParallelReadoutDecoder(nn.Module):
     """Deterministic latent-slot to answer-token readout."""
 
@@ -161,8 +224,10 @@ class MathJEPAReadout(nn.Module):
         predictor_layers: int = 3,
         readout_layers: int = 2,
         num_heads: int = 4,
+        predictor_type: str = "pooled",
     ):
         super().__init__()
+        self.predictor_type = predictor_type
         self.problem_encoder = MeanPoolEncoder(
             vocab_size, d_model, max_problem_len, num_layers=encoder_layers, num_heads=num_heads
         )
@@ -172,9 +237,16 @@ class MathJEPAReadout(nn.Module):
         self.target_encoder_ema = copy.deepcopy(self.target_encoder)
         for param in self.target_encoder_ema.parameters():
             param.requires_grad = False
-        self.predictor = SequencePredictor(
-            d_model, num_slots, num_layers=predictor_layers, num_heads=num_heads
-        )
+        if predictor_type == "pooled":
+            self.predictor = SequencePredictor(
+                d_model, num_slots, num_layers=predictor_layers, num_heads=num_heads
+            )
+        elif predictor_type == "cross_attn":
+            self.predictor = CrossAttentionSequencePredictor(
+                d_model, num_slots, num_layers=predictor_layers, num_heads=num_heads
+            )
+        else:
+            raise ValueError(f"Unknown predictor_type: {predictor_type}")
         self.readout = ParallelReadoutDecoder(
             d_model, vocab_size, max_answer_len, num_layers=readout_layers, num_heads=num_heads
         )
@@ -193,11 +265,19 @@ class MathJEPAReadout(nn.Module):
     def encode_context(self, problem_ids: torch.Tensor) -> torch.Tensor:
         return self.problem_encoder(problem_ids)
 
+    def encode_context_sequence(
+        self, problem_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.problem_encoder.forward_sequence(problem_ids)
+
     def encode_target(self, answer_ids: torch.Tensor, use_ema: bool = True) -> torch.Tensor:
         encoder = self.target_encoder_ema if use_ema else self.target_encoder
         return encoder(answer_ids)
 
     def predict_slots(self, problem_ids: torch.Tensor) -> torch.Tensor:
+        if self.predictor_type == "cross_attn":
+            tokens, mask = self.encode_context_sequence(problem_ids)
+            return self.predictor(tokens, mask)
         return self.predictor(self.encode_context(problem_ids))
 
     def readout_loss(
