@@ -93,6 +93,17 @@ def save_checkpoint(model, args, tokenizer, output_dir: Path, best_acc: float) -
     )
 
 
+def load_matching_state_dict(model: torch.nn.Module, state_dict: dict[str, torch.Tensor]) -> int:
+    current = model.state_dict()
+    matched = {
+        key: value
+        for key, value in state_dict.items()
+        if key in current and current[key].shape == value.shape
+    }
+    model.load_state_dict(matched, strict=False)
+    return len(matched)
+
+
 def run_stage(
     *,
     name: str,
@@ -203,11 +214,20 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--d-model", type=int, default=128)
     parser.add_argument("--num-slots", type=int, default=8)
+    parser.add_argument("--encoder-layers", type=int, default=2)
+    parser.add_argument("--predictor-layers", type=int, default=3)
+    parser.add_argument("--readout-layers", type=int, default=2)
+    parser.add_argument("--num-heads", type=int, default=4)
     parser.add_argument("--max-problem-len", type=int, default=64)
     parser.add_argument("--max-answer-len", type=int, default=16)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--output-dir", default="checkpoints")
     parser.add_argument("--checkpoint", default=None, help="Optional checkpoint to resume from.")
+    parser.add_argument(
+        "--partial-checkpoint",
+        action="store_true",
+        help="Load only matching tensors, useful when increasing predictor capacity.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--overfit", action="store_true")
     parser.add_argument("--eval-every", type=int, default=50)
@@ -246,6 +266,11 @@ def main() -> None:
         args.max_answer_len = ckpt_args.get("max_answer_len", args.max_answer_len)
         args.d_model = ckpt_args.get("d_model", args.d_model)
         args.num_slots = ckpt_args.get("num_slots", args.num_slots)
+        args.encoder_layers = ckpt_args.get("encoder_layers", args.encoder_layers)
+        args.readout_layers = ckpt_args.get("readout_layers", args.readout_layers)
+        args.num_heads = ckpt_args.get("num_heads", args.num_heads)
+        if not args.partial_checkpoint:
+            args.predictor_layers = ckpt_args.get("predictor_layers", args.predictor_layers)
 
     train_examples = generate_math_examples(args.train_size, seed=args.seed)
     val_examples = train_examples if args.overfit else generate_math_examples(args.val_size, seed=args.seed + 1)
@@ -259,10 +284,18 @@ def main() -> None:
         max_answer_len=args.max_answer_len,
         d_model=args.d_model,
         num_slots=args.num_slots,
+        encoder_layers=args.encoder_layers,
+        predictor_layers=args.predictor_layers,
+        readout_layers=args.readout_layers,
+        num_heads=args.num_heads,
     ).to(device)
     if checkpoint is not None:
-        model.load_state_dict(checkpoint["model"])
-        print(f"loaded checkpoint={args.checkpoint}")
+        if args.partial_checkpoint:
+            matched = load_matching_state_dict(model, checkpoint["model"])
+            print(f"partially loaded checkpoint={args.checkpoint} tensors={matched}")
+        else:
+            model.load_state_dict(checkpoint["model"])
+            print(f"loaded checkpoint={args.checkpoint}")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -8,13 +8,20 @@ import torch.nn.functional as F
 
 
 class MeanPoolEncoder(nn.Module):
-    def __init__(self, vocab_size: int, d_model: int, max_len: int, num_layers: int = 2):
+    def __init__(
+        self,
+        vocab_size: int,
+        d_model: int,
+        max_len: int,
+        num_layers: int = 2,
+        num_heads: int = 4,
+    ):
         super().__init__()
         self.token_embed = nn.Embedding(vocab_size, d_model)
         self.pos_embed = nn.Parameter(torch.randn(1, max_len, d_model) * 0.02)
         layer = nn.TransformerEncoderLayer(
             d_model=d_model,
-            nhead=4,
+            nhead=num_heads,
             dim_feedforward=d_model * 4,
             batch_first=True,
             norm_first=True,
@@ -35,12 +42,19 @@ class MeanPoolEncoder(nn.Module):
 class SlotTargetEncoder(nn.Module):
     """Encode answer tokens into K latent slots via learned queries."""
 
-    def __init__(self, vocab_size: int, d_model: int, max_len: int, num_slots: int):
+    def __init__(
+        self,
+        vocab_size: int,
+        d_model: int,
+        max_len: int,
+        num_slots: int,
+        num_heads: int = 4,
+    ):
         super().__init__()
         self.token_embed = nn.Embedding(vocab_size, d_model)
         self.pos_embed = nn.Parameter(torch.randn(1, max_len, d_model) * 0.02)
         self.slot_queries = nn.Parameter(torch.randn(1, num_slots, d_model) * 0.02)
-        self.cross_attn = nn.MultiheadAttention(d_model, num_heads=4, batch_first=True)
+        self.cross_attn = nn.MultiheadAttention(d_model, num_heads=num_heads, batch_first=True)
         self.ff = nn.Sequential(
             nn.LayerNorm(d_model),
             nn.Linear(d_model, d_model * 4),
@@ -59,12 +73,18 @@ class SlotTargetEncoder(nn.Module):
 
 
 class SequencePredictor(nn.Module):
-    def __init__(self, d_model: int, num_slots: int, num_layers: int = 3):
+    def __init__(
+        self,
+        d_model: int,
+        num_slots: int,
+        num_layers: int = 3,
+        num_heads: int = 4,
+    ):
         super().__init__()
         self.slot_queries = nn.Parameter(torch.randn(1, num_slots, d_model) * 0.02)
         layer = nn.TransformerEncoderLayer(
             d_model=d_model,
-            nhead=4,
+            nhead=num_heads,
             dim_feedforward=d_model * 4,
             batch_first=True,
             norm_first=True,
@@ -85,13 +105,20 @@ class SequencePredictor(nn.Module):
 class ParallelReadoutDecoder(nn.Module):
     """Deterministic latent-slot to answer-token readout."""
 
-    def __init__(self, d_model: int, vocab_size: int, max_answer_len: int, num_layers: int = 2):
+    def __init__(
+        self,
+        d_model: int,
+        vocab_size: int,
+        max_answer_len: int,
+        num_layers: int = 2,
+        num_heads: int = 4,
+    ):
         super().__init__()
         self.max_answer_len = max_answer_len
         self.query_embed = nn.Parameter(torch.randn(1, max_answer_len, d_model) * 0.02)
         layer = nn.TransformerDecoderLayer(
             d_model=d_model,
-            nhead=4,
+            nhead=num_heads,
             dim_feedforward=d_model * 4,
             batch_first=True,
             norm_first=True,
@@ -130,15 +157,27 @@ class MathJEPAReadout(nn.Module):
         max_answer_len: int = 16,
         d_model: int = 128,
         num_slots: int = 8,
+        encoder_layers: int = 2,
+        predictor_layers: int = 3,
+        readout_layers: int = 2,
+        num_heads: int = 4,
     ):
         super().__init__()
-        self.problem_encoder = MeanPoolEncoder(vocab_size, d_model, max_problem_len)
-        self.target_encoder = SlotTargetEncoder(vocab_size, d_model, max_answer_len, num_slots)
+        self.problem_encoder = MeanPoolEncoder(
+            vocab_size, d_model, max_problem_len, num_layers=encoder_layers, num_heads=num_heads
+        )
+        self.target_encoder = SlotTargetEncoder(
+            vocab_size, d_model, max_answer_len, num_slots, num_heads=num_heads
+        )
         self.target_encoder_ema = copy.deepcopy(self.target_encoder)
         for param in self.target_encoder_ema.parameters():
             param.requires_grad = False
-        self.predictor = SequencePredictor(d_model, num_slots)
-        self.readout = ParallelReadoutDecoder(d_model, vocab_size, max_answer_len)
+        self.predictor = SequencePredictor(
+            d_model, num_slots, num_layers=predictor_layers, num_heads=num_heads
+        )
+        self.readout = ParallelReadoutDecoder(
+            d_model, vocab_size, max_answer_len, num_layers=readout_layers, num_heads=num_heads
+        )
 
     @torch.no_grad()
     def ema_update_target_encoder(self, decay: float = 0.996) -> None:

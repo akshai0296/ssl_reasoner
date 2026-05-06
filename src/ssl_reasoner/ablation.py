@@ -109,6 +109,10 @@ def main() -> None:
         max_answer_len=train_args["max_answer_len"],
         d_model=train_args["d_model"],
         num_slots=train_args["num_slots"],
+        encoder_layers=train_args.get("encoder_layers", 2),
+        predictor_layers=train_args.get("predictor_layers", 3),
+        readout_layers=train_args.get("readout_layers", 2),
+        num_heads=train_args.get("num_heads", 4),
     ).to(device)
     model.load_state_dict(ckpt["model"])
 
