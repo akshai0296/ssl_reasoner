@@ -27,7 +27,9 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=123)
-    parser.add_argument("--mode", choices=["pred", "target", "trace"], default="pred")
+    parser.add_argument(
+        "--mode", choices=["pred", "target", "trace", "trace_struct"], default="pred"
+    )
     parser.add_argument(
         "--curriculum",
         choices=["mixed", "single_op_balanced", "mixed_only"],
@@ -74,6 +76,24 @@ def main() -> None:
     shown = 0
     with torch.no_grad():
         for batch in loader:
+            if args.mode == "trace_struct":
+                pred_ops, pred_values = model.predict_structured_trace(
+                    batch["problem_ids"].to(device),
+                    math_ids=batch["math_ids"].to(device),
+                )
+                op_ids = batch["trace_op_ids"].to(device)
+                value_targets = batch["trace_values"].to(device)
+                value_mask = batch["trace_value_mask"].to(device)
+                op_correct = int((pred_ops == op_ids).sum().item())
+                op_total = int(op_ids.numel())
+                value_error = float(((pred_values - value_targets).abs() * value_mask).sum().item())
+                value_total = float(value_mask.sum().item())
+                correct += op_correct
+                total += op_total
+                counts = by_op.setdefault("value_mae", [0, 0])
+                counts[0] += value_error
+                counts[1] += value_total
+                continue
             if args.mode == "pred":
                 decoded = model.solve_ids(
                     batch["problem_ids"].to(device),
@@ -109,6 +129,11 @@ def main() -> None:
                     mark = "ok" if is_correct else "bad"
                     print(f"{mark}: {problem} -> pred={pred!r} target={answer!r}")
                     shown += 1
+    if args.mode == "trace_struct":
+        value_counts = by_op.pop("value_mae", [0, 1])
+        print(f"trace_struct_op_acc={correct / max(total, 1):.3f} ({correct}/{total})")
+        print(f"trace_struct_value_mae={value_counts[0] / max(value_counts[1], 1):.3f}")
+        return
     print(f"{args.mode}_exact_match={correct / max(total, 1):.3f} ({correct}/{total})")
     for op_label, counts in sorted(by_op.items()):
         acc = counts[0] / max(counts[1], 1)

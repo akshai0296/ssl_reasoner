@@ -25,6 +25,8 @@ MATH_FEATURE_PLUS_ID = 202
 MATH_FEATURE_MINUS_ID = 203
 MATH_FEATURE_TIMES_ID = 204
 MATH_FEATURE_VOCAB_SIZE = 205
+TRACE_OP_TO_ID = {"none": 0, "+": 1, "-": 2, "*": 3}
+TRACE_VALUE_SCALE = 1000.0
 
 
 def encode_math_features(problem: str, max_len: int = 8) -> list[int]:
@@ -62,6 +64,57 @@ def make_trace(expr: str) -> str:
         second_expr = f"{first_value}{op2}{c}"
         second_value = eval(second_expr)
     return f"{first_expr}={first_value} {second_expr}={second_value}"
+
+
+def make_trace_fields(expr: str) -> tuple[list[int], list[float], list[float]]:
+    parts = re.split(r"([+\-*])", expr)
+    if len(parts) == 3:
+        a, op, b = parts
+        value = eval(expr)
+        return (
+            [TRACE_OP_TO_ID[op], TRACE_OP_TO_ID["none"]],
+            [float(a), float(b), float(value), 0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+        )
+
+    if len(parts) != 5:
+        value = eval(expr)
+        return (
+            [TRACE_OP_TO_ID["none"], TRACE_OP_TO_ID["none"]],
+            [float(value), 0.0, float(value), 0.0, 0.0, 0.0],
+            [1.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        )
+
+    a, op1, b, op2, c = parts
+    if op2 == "*":
+        first_lhs = float(b)
+        first_rhs = float(c)
+        first_op = op2
+        first_value = eval(f"{b}{op2}{c}")
+        second_lhs = float(a)
+        second_rhs = float(first_value)
+        second_op = op1
+    else:
+        first_lhs = float(a)
+        first_rhs = float(b)
+        first_op = op1
+        first_value = eval(f"{a}{op1}{b}")
+        second_lhs = float(first_value)
+        second_rhs = float(c)
+        second_op = op2
+    second_value = eval(f"{int(second_lhs)}{second_op}{int(second_rhs)}")
+    return (
+        [TRACE_OP_TO_ID[first_op], TRACE_OP_TO_ID[second_op]],
+        [
+            first_lhs,
+            first_rhs,
+            float(first_value),
+            second_lhs,
+            second_rhs,
+            float(second_value),
+        ],
+        [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    )
 
 
 def _make_expression(
@@ -153,6 +206,9 @@ class MathDataset(Dataset):
         answer_ids = self.tokenizer.encode(ex.answer, self.max_answer_len)
         math_ids = encode_math_features(ex.problem, self.max_math_len)
         trace_ids = self.tokenizer.encode(ex.trace, self.max_trace_len)
+        trace_op_ids, trace_values, trace_value_mask = make_trace_fields(
+            re.search(r"\d+[+\-*]\d+(?:[+\-*]\d+)?", ex.problem).group(0)
+        )
         answer_len = min(len(ex.answer) + 2, self.max_answer_len)
         trace_len = min(len(ex.trace) + 2, self.max_trace_len)
         return {
@@ -162,6 +218,9 @@ class MathDataset(Dataset):
             "answer_len": torch.tensor(answer_len, dtype=torch.long),
             "trace_ids": torch.tensor(trace_ids, dtype=torch.long),
             "trace_len": torch.tensor(trace_len, dtype=torch.long),
+            "trace_op_ids": torch.tensor(trace_op_ids, dtype=torch.long),
+            "trace_values": torch.tensor(trace_values, dtype=torch.float),
+            "trace_value_mask": torch.tensor(trace_value_mask, dtype=torch.float),
             "answer": ex.answer,
             "trace": ex.trace,
             "problem": ex.problem,

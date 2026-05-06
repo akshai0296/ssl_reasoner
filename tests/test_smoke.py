@@ -1,6 +1,12 @@
 import torch
 
-from ssl_reasoner.data import MathDataset, encode_math_features, generate_math_examples, make_trace
+from ssl_reasoner.data import (
+    MathDataset,
+    encode_math_features,
+    generate_math_examples,
+    make_trace,
+    make_trace_fields,
+)
 from ssl_reasoner.diagnostics import latent_health
 from ssl_reasoner.model import MathJEPAReadout
 from ssl_reasoner.tokenizer import build_math_tokenizer
@@ -79,6 +85,13 @@ def test_trace_respects_multiplication_precedence():
     assert make_trace("30+41+12") == "30+41=71 71+12=83"
 
 
+def test_structured_trace_fields_respect_precedence():
+    op_ids, values, mask = make_trace_fields("20+1*0")
+    assert op_ids == [3, 1]
+    assert values == [1.0, 0.0, 0.0, 20.0, 0.0, 20.0]
+    assert mask == [1.0] * 6
+
+
 def test_cross_attention_with_math_features_forward():
     tokenizer = build_math_tokenizer()
     dataset = MathDataset(generate_math_examples(4), tokenizer)
@@ -109,6 +122,9 @@ def test_reasoning_trace_forward():
     math_ids = torch.stack([item["math_ids"] for item in batch])
     trace_ids = torch.stack([item["trace_ids"] for item in batch])
     trace_len = torch.stack([item["trace_len"] for item in batch])
+    trace_op_ids = torch.stack([item["trace_op_ids"] for item in batch])
+    trace_values = torch.stack([item["trace_values"] for item in batch])
+    trace_value_mask = torch.stack([item["trace_value_mask"] for item in batch])
 
     model = MathJEPAReadout(
         vocab_size=tokenizer.vocab_size,
@@ -123,10 +139,17 @@ def test_reasoning_trace_forward():
         math_ids=math_ids,
         trace_ids=trace_ids,
         trace_len=trace_len,
+        trace_op_ids=trace_op_ids,
+        trace_values=trace_values,
+        trace_value_mask=trace_value_mask,
     )
     decoded_trace = model.solve_trace_ids(problem_ids, pad_id=tokenizer.pad_id, math_ids=math_ids)
+    pred_ops, pred_values = model.predict_structured_trace(problem_ids, math_ids=math_ids)
 
     assert out["loss"].ndim == 0
     assert out["pred_slots"].shape == (4, 8, 128)
     assert out["trace_pred_loss"].ndim == 0
+    assert out["trace_struct_op_loss"].ndim == 0
     assert len(decoded_trace) == 4
+    assert pred_ops.shape == (4, 2)
+    assert pred_values.shape == (4, 6)

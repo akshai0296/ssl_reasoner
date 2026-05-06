@@ -105,6 +105,34 @@ def evaluate_trace(model, dataset, tokenizer, device, batch_size: int) -> float:
 
 
 @torch.no_grad()
+def evaluate_structured_trace(model, dataset, device, batch_size: int) -> dict[str, float]:
+    if not model.use_reasoning_trace:
+        return {"trace_struct_op_acc": 0.0, "trace_struct_value_mae": 0.0}
+    model.eval()
+    loader = DataLoader(dataset, batch_size=batch_size)
+    op_correct = 0
+    op_total = 0
+    value_abs_error = 0.0
+    value_total = 0.0
+    for batch in loader:
+        pred_ops, pred_values = model.predict_structured_trace(
+            batch["problem_ids"].to(device),
+            math_ids=batch["math_ids"].to(device),
+        )
+        op_ids = batch["trace_op_ids"].to(device)
+        value_targets = batch["trace_values"].to(device)
+        value_mask = batch["trace_value_mask"].to(device)
+        op_correct += int((pred_ops == op_ids).sum().item())
+        op_total += int(op_ids.numel())
+        value_abs_error += float(((pred_values - value_targets).abs() * value_mask).sum().item())
+        value_total += float(value_mask.sum().item())
+    return {
+        "trace_struct_op_acc": op_correct / max(op_total, 1),
+        "trace_struct_value_mae": value_abs_error / max(value_total, 1.0),
+    }
+
+
+@torch.no_grad()
 def format_samples(
     model,
     dataset,
@@ -184,6 +212,9 @@ def run_stage(
             math_ids = batch["math_ids"].to(device)
             trace_ids = batch["trace_ids"].to(device)
             trace_len = batch["trace_len"].to(device)
+            trace_op_ids = batch["trace_op_ids"].to(device)
+            trace_values = batch["trace_values"].to(device)
+            trace_value_mask = batch["trace_value_mask"].to(device)
 
             if name == "stage0_target_warmup":
                 out = model.stage0_target_autoencode(
@@ -200,7 +231,11 @@ def run_stage(
                     math_ids=math_ids,
                     trace_ids=trace_ids,
                     trace_len=trace_len,
+                    trace_op_ids=trace_op_ids,
+                    trace_values=trace_values,
+                    trace_value_mask=trace_value_mask,
                     trace_weight=args.trace_weight,
+                    trace_struct_weight=args.trace_struct_weight,
                     contrastive_weight=args.contrastive_weight,
                     vicreg_weight=args.vicreg_weight,
                     slot_diversity_weight=args.slot_diversity_weight,
@@ -239,15 +274,18 @@ def run_stage(
                     model, val_dataset, tokenizer, device, batch_size, mode="target"
                 )
                 trace_acc = evaluate_trace(model, val_dataset, tokenizer, device, batch_size)
+                trace_struct = evaluate_structured_trace(model, val_dataset, device, batch_size)
                 metrics = " ".join(
                     f"{key}={value.item():.4f}"
                     for key, value in out.items()
-                    if key.endswith("loss")
+                    if key.endswith("loss") or key in {"trace_struct_op_acc", "trace_struct_value_mae"}
                 )
                 print(
                     f"{name} step={step} {metrics} "
                     f"pred_exact={pred_acc:.3f} target_exact={target_acc:.3f} "
-                    f"trace_exact={trace_acc:.3f}"
+                    f"trace_exact={trace_acc:.3f} "
+                    f"trace_struct_op_acc={trace_struct['trace_struct_op_acc']:.3f} "
+                    f"trace_struct_value_mae={trace_struct['trace_struct_value_mae']:.1f}"
                 )
                 op_metrics = " ".join(
                     f"{key}={value:.3f}"
@@ -332,6 +370,7 @@ def main() -> None:
     parser.add_argument("--true-latent-ratio", type=float, default=1.0)
     parser.add_argument("--target-readout-weight", type=float, default=1.0)
     parser.add_argument("--trace-weight", type=float, default=0.5)
+    parser.add_argument("--trace-struct-weight", type=float, default=1.0)
     parser.add_argument(
         "--stages",
         default="0,1,2",
@@ -474,7 +513,9 @@ def main() -> None:
             _set_trainable(model.trace_target_encoder, False)
             _set_trainable(model.trace_readout, False)
             _set_trainable(model.trace_predictor, True)
+            _set_trainable(model.trace_struct_head, True)
             stage1_params += list(model.trace_predictor.parameters())
+            stage1_params += list(model.trace_struct_head.parameters())
         optimizer = torch.optim.AdamW(
             stage1_params,
             lr=args.lr,
@@ -506,6 +547,7 @@ def main() -> None:
             _set_trainable(model.trace_target_encoder, False)
             _set_trainable(model.trace_predictor, False)
             _set_trainable(model.trace_readout, False)
+            _set_trainable(model.trace_struct_head, False)
         optimizer = torch.optim.AdamW(model.readout.parameters(), lr=args.lr, weight_decay=0.01)
         best_acc = run_stage(
             name="stage2_readout",
