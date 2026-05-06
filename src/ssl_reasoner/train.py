@@ -49,16 +49,33 @@ def predict_batch(model, batch, tokenizer, device, mode: str = "pred") -> list[s
 
 @torch.no_grad()
 def evaluate(model, dataset, tokenizer, device, batch_size: int, mode: str = "pred") -> float:
+    return evaluate_with_breakdown(model, dataset, tokenizer, device, batch_size, mode=mode)[
+        "overall"
+    ]
+
+
+@torch.no_grad()
+def evaluate_with_breakdown(
+    model, dataset, tokenizer, device, batch_size: int, mode: str = "pred"
+) -> dict[str, float]:
     model.eval()
     loader = DataLoader(dataset, batch_size=batch_size)
     correct = 0
     total = 0
+    by_op: dict[str, list[int]] = {}
     for batch in loader:
         predictions = predict_batch(model, batch, tokenizer, device, mode=mode)
-        for pred, answer in zip(predictions, batch["answer"]):
-            correct += pred == answer
+        for pred, answer, op_label in zip(predictions, batch["answer"], batch["op_label"]):
+            is_correct = int(pred == answer)
+            correct += is_correct
             total += 1
-    return correct / max(total, 1)
+            counts = by_op.setdefault(str(op_label), [0, 0])
+            counts[0] += is_correct
+            counts[1] += 1
+    stats = {"overall": correct / max(total, 1)}
+    for op_label, counts in sorted(by_op.items()):
+        stats[f"op_{op_label}"] = counts[0] / max(counts[1], 1)
+    return stats
 
 
 @torch.no_grad()
@@ -78,6 +95,7 @@ def format_samples(
         "math_ids": torch.stack([item["math_ids"] for item in subset]),
         "answer": [item["answer"] for item in subset],
         "problem": [item["problem"] for item in subset],
+        "op_label": [item["op_label"] for item in subset],
     }
     predictions = predict_batch(model, batch, tokenizer, device, mode=mode)
     rows = []
@@ -175,7 +193,10 @@ def run_stage(
 
             step += 1
             if step == 1 or step % eval_every == 0 or step == steps:
-                pred_acc = evaluate(model, val_dataset, tokenizer, device, batch_size, mode="pred")
+                pred_stats = evaluate_with_breakdown(
+                    model, val_dataset, tokenizer, device, batch_size, mode="pred"
+                )
+                pred_acc = pred_stats["overall"]
                 target_acc = evaluate(
                     model, val_dataset, tokenizer, device, batch_size, mode="target"
                 )
@@ -188,6 +209,13 @@ def run_stage(
                     f"{name} step={step} {metrics} "
                     f"pred_exact={pred_acc:.3f} target_exact={target_acc:.3f}"
                 )
+                op_metrics = " ".join(
+                    f"{key}={value:.3f}"
+                    for key, value in pred_stats.items()
+                    if key.startswith("op_")
+                )
+                if op_metrics:
+                    print(f"  pred_breakdown {op_metrics}")
                 if name == "stage1_predictor":
                     diag = latent_health(model, val_dataset, device, batch_size)
                     print(
@@ -219,6 +247,16 @@ def main() -> None:
     parser.add_argument("--stage2-steps", type=int, default=None)
     parser.add_argument("--train-size", type=int, default=5000)
     parser.add_argument("--val-size", type=int, default=500)
+    parser.add_argument(
+        "--train-curriculum",
+        choices=["mixed", "single_op_balanced"],
+        default="mixed",
+    )
+    parser.add_argument(
+        "--val-curriculum",
+        choices=["mixed", "single_op_balanced"],
+        default="mixed",
+    )
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--d-model", type=int, default=128)
@@ -287,8 +325,16 @@ def main() -> None:
             args.predictor_type = ckpt_args.get("predictor_type", args.predictor_type)
             args.use_math_features = ckpt_args.get("use_math_features", args.use_math_features)
 
-    train_examples = generate_math_examples(args.train_size, seed=args.seed)
-    val_examples = train_examples if args.overfit else generate_math_examples(args.val_size, seed=args.seed + 1)
+    train_examples = generate_math_examples(
+        args.train_size, seed=args.seed, curriculum=args.train_curriculum
+    )
+    val_examples = (
+        train_examples
+        if args.overfit
+        else generate_math_examples(
+            args.val_size, seed=args.seed + 1, curriculum=args.val_curriculum
+        )
+    )
     train_dataset = MathDataset(
         train_examples, tokenizer, args.max_problem_len, args.max_answer_len, args.max_math_len
     )

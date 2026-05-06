@@ -105,6 +105,11 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument(
+        "--curriculum",
+        choices=["mixed", "single_op_balanced"],
+        default="mixed",
+    )
     args = parser.parse_args()
 
     device = _device(args.device)
@@ -129,14 +134,16 @@ def main() -> None:
     model.load_state_dict(ckpt["model"])
 
     eval_dataset = MathDataset(
-        generate_math_examples(args.samples, seed=args.seed),
+        generate_math_examples(args.samples, seed=args.seed, curriculum=args.curriculum),
         tokenizer,
         train_args["max_problem_len"],
         train_args["max_answer_len"],
         train_args.get("max_math_len", 8),
     )
     ablation_train = MathDataset(
-        generate_math_examples(args.ablation_train_size, seed=args.seed + 1),
+        generate_math_examples(
+            args.ablation_train_size, seed=args.seed + 1, curriculum=args.curriculum
+        ),
         tokenizer,
         train_args["max_problem_len"],
         train_args["max_answer_len"],

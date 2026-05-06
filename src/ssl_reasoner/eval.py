@@ -28,6 +28,11 @@ def main() -> None:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--mode", choices=["pred", "target"], default="pred")
+    parser.add_argument(
+        "--curriculum",
+        choices=["mixed", "single_op_balanced"],
+        default="mixed",
+    )
     args = parser.parse_args()
 
     device = _device(args.device)
@@ -53,7 +58,7 @@ def main() -> None:
     model.eval()
 
     dataset = MathDataset(
-        generate_math_examples(args.samples, seed=args.seed),
+        generate_math_examples(args.samples, seed=args.seed, curriculum=args.curriculum),
         tokenizer,
         train_args["max_problem_len"],
         train_args["max_answer_len"],
@@ -62,6 +67,7 @@ def main() -> None:
     loader = DataLoader(dataset, batch_size=args.batch_size)
     correct = 0
     total = 0
+    by_op: dict[str, list[int]] = {}
     shown = 0
     with torch.no_grad():
         for batch in loader:
@@ -78,15 +84,23 @@ def main() -> None:
                     use_ema=True,
                 )
             predictions = [tokenizer.decode(ids).strip() for ids in decoded]
-            for problem, pred, answer in zip(batch["problem"], predictions, batch["answer"]):
+            for problem, pred, answer, op_label in zip(
+                batch["problem"], predictions, batch["answer"], batch["op_label"]
+            ):
                 is_correct = pred == answer
                 correct += is_correct
                 total += 1
+                counts = by_op.setdefault(str(op_label), [0, 0])
+                counts[0] += int(is_correct)
+                counts[1] += 1
                 if shown < 10:
                     mark = "ok" if is_correct else "bad"
                     print(f"{mark}: {problem} -> pred={pred!r} target={answer!r}")
                     shown += 1
     print(f"{args.mode}_exact_match={correct / max(total, 1):.3f} ({correct}/{total})")
+    for op_label, counts in sorted(by_op.items()):
+        acc = counts[0] / max(counts[1], 1)
+        print(f"{args.mode}_op_{op_label}_exact={acc:.3f} ({counts[0]}/{counts[1]})")
 
 
 if __name__ == "__main__":

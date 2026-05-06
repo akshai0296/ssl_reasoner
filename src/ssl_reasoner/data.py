@@ -14,6 +14,8 @@ from .tokenizer import CharTokenizer
 class MathExample:
     problem: str
     answer: str
+    op_label: str
+    difficulty: int
 
 
 MATH_FEATURE_PAD_ID = 0
@@ -42,16 +44,18 @@ def encode_math_features(problem: str, max_len: int = 8) -> list[int]:
     return ids
 
 
-def _make_expression(rng: random.Random, difficulty: int) -> tuple[str, int]:
+def _make_expression(
+    rng: random.Random, difficulty: int, op: str | None = None
+) -> tuple[str, int, str]:
     if difficulty == 0:
-        op = rng.choice(["+", "-", "*"])
+        op = op or rng.choice(["+", "-", "*"])
         limit = 20 if op == "*" else 100
         a = rng.randint(0, limit)
         b = rng.randint(0, limit)
         if op == "-":
             a, b = max(a, b), min(a, b)
         expr = f"{a}{op}{b}"
-        return expr, eval(expr)
+        return expr, eval(expr), op
 
     a = rng.randint(0, 50)
     b = rng.randint(0, 50)
@@ -59,19 +63,28 @@ def _make_expression(rng: random.Random, difficulty: int) -> tuple[str, int]:
     op1 = rng.choice(["+", "-"])
     op2 = rng.choice(["+", "-", "*"])
     expr = f"{a}{op1}{b}{op2}{c}"
-    return expr, eval(expr)
+    return expr, eval(expr), "mixed"
 
 
 def generate_math_examples(
     n: int,
     seed: int = 0,
     difficulty_mix: tuple[float, float] = (0.75, 0.25),
+    curriculum: str = "mixed",
 ) -> list[MathExample]:
     rng = random.Random(seed)
     examples = []
-    for _ in range(n):
-        difficulty = 0 if rng.random() < difficulty_mix[0] else 1
-        expr, value = _make_expression(rng, difficulty)
+    ops = ["+", "-", "*"]
+    for idx in range(n):
+        if curriculum == "mixed":
+            difficulty = 0 if rng.random() < difficulty_mix[0] else 1
+            op = None
+        elif curriculum == "single_op_balanced":
+            difficulty = 0
+            op = ops[idx % len(ops)]
+        else:
+            raise ValueError(f"Unknown curriculum: {curriculum}")
+        expr, value, op_label = _make_expression(rng, difficulty, op=op)
         template = rng.choice(
             [
                 "What is {expr}?",
@@ -79,7 +92,14 @@ def generate_math_examples(
                 "Find the value of {expr}.",
             ]
         )
-        examples.append(MathExample(problem=template.format(expr=expr), answer=str(value)))
+        examples.append(
+            MathExample(
+                problem=template.format(expr=expr),
+                answer=str(value),
+                op_label=op_label,
+                difficulty=difficulty,
+            )
+        )
     return examples
 
 
@@ -114,4 +134,6 @@ class MathDataset(Dataset):
             "answer_len": torch.tensor(answer_len, dtype=torch.long),
             "answer": ex.answer,
             "problem": ex.problem,
+            "op_label": ex.op_label,
+            "difficulty": ex.difficulty,
         }

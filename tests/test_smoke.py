@@ -62,6 +62,12 @@ def test_math_features_extract_expression_tokens():
     assert ids[5:] == [0, 0, 0]
 
 
+def test_single_op_balanced_curriculum_cycles_operations():
+    examples = generate_math_examples(6, seed=0, curriculum="single_op_balanced")
+    assert [example.op_label for example in examples] == ["+", "-", "*", "+", "-", "*"]
+    assert {example.difficulty for example in examples} == {0}
+
+
 def test_cross_attention_with_math_features_forward():
     tokenizer = build_math_tokenizer()
     dataset = MathDataset(generate_math_examples(4), tokenizer)
