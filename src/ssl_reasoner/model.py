@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+TRACE_VALUE_CLASSES = 1401
+
 
 class MeanPoolEncoder(nn.Module):
     def __init__(
@@ -279,7 +281,7 @@ class MathJEPAReadout(nn.Module):
                 nn.LayerNorm(d_model),
                 nn.Linear(d_model, d_model),
                 nn.GELU(),
-                nn.Linear(d_model, 14),
+                nn.Linear(d_model, 8 + 6 * TRACE_VALUE_CLASSES),
             )
 
     @torch.no_grad()
@@ -384,25 +386,30 @@ class MathJEPAReadout(nn.Module):
         self,
         slots: torch.Tensor,
         trace_op_ids: torch.Tensor,
-        trace_values: torch.Tensor,
+        trace_value_ids: torch.Tensor,
         trace_value_mask: torch.Tensor,
-        value_scale: float = 1000.0,
     ) -> dict[str, torch.Tensor]:
         pred = self.trace_struct_head(slots.mean(dim=1))
         op_logits = pred[:, :8].view(-1, 2, 4)
-        value_pred = pred[:, 8:]
+        value_logits = pred[:, 8:].view(-1, 6, TRACE_VALUE_CLASSES)
         op_loss = F.cross_entropy(op_logits.reshape(-1, 4), trace_op_ids.reshape(-1))
-        value_target = trace_values / value_scale
         value_mask = trace_value_mask
-        value_loss = ((value_pred - value_target).pow(2) * value_mask).sum() / value_mask.sum().clamp(min=1.0)
+        per_value_loss = F.cross_entropy(
+            value_logits.reshape(-1, TRACE_VALUE_CLASSES),
+            trace_value_ids.reshape(-1),
+            reduction="none",
+        ).view_as(value_mask)
+        value_loss = (per_value_loss * value_mask).sum() / value_mask.sum().clamp(min=1.0)
         op_acc = (op_logits.argmax(dim=-1) == trace_op_ids).float().mean()
-        value_mae = ((value_pred * value_scale - trace_values).abs() * value_mask).sum() / value_mask.sum().clamp(min=1.0)
+        value_acc = (
+            (value_logits.argmax(dim=-1) == trace_value_ids).float() * value_mask
+        ).sum() / value_mask.sum().clamp(min=1.0)
         return {
             "loss": op_loss + value_loss,
             "trace_struct_op_loss": op_loss,
             "trace_struct_value_loss": value_loss,
             "trace_struct_op_acc": op_acc,
-            "trace_struct_value_mae": value_mae,
+            "trace_struct_value_acc": value_acc,
         }
 
     @staticmethod
@@ -477,7 +484,7 @@ class MathJEPAReadout(nn.Module):
         trace_ids: torch.Tensor | None = None,
         trace_len: torch.Tensor | None = None,
         trace_op_ids: torch.Tensor | None = None,
-        trace_values: torch.Tensor | None = None,
+        trace_value_ids: torch.Tensor | None = None,
         trace_value_mask: torch.Tensor | None = None,
         trace_weight: float = 0.5,
         trace_struct_weight: float = 1.0,
@@ -525,20 +532,20 @@ class MathJEPAReadout(nn.Module):
                 result["trace_length_loss"] = trace_dec["trace_length_loss"]
             if (
                 trace_op_ids is not None
-                and trace_values is not None
+                and trace_value_ids is not None
                 and trace_value_mask is not None
             ):
                 trace_struct = self.structured_trace_loss(
                     trace_pred_slots,
                     trace_op_ids,
-                    trace_values,
+                    trace_value_ids,
                     trace_value_mask,
                 )
                 trace_aux_loss = trace_aux_loss + trace_struct_weight * trace_struct["loss"]
                 result["trace_struct_op_loss"] = trace_struct["trace_struct_op_loss"]
                 result["trace_struct_value_loss"] = trace_struct["trace_struct_value_loss"]
                 result["trace_struct_op_acc"] = trace_struct["trace_struct_op_acc"]
-                result["trace_struct_value_mae"] = trace_struct["trace_struct_value_mae"]
+                result["trace_struct_value_acc"] = trace_struct["trace_struct_value_acc"]
             result["loss"] = result["loss"] + trace_weight * trace_aux_loss
             result["trace_pred_loss"] = trace_pred_loss
             result["trace_contrastive_loss"] = trace_contrastive_loss
@@ -555,7 +562,7 @@ class MathJEPAReadout(nn.Module):
         trace_ids: torch.Tensor | None = None,
         trace_len: torch.Tensor | None = None,
         trace_op_ids: torch.Tensor | None = None,
-        trace_values: torch.Tensor | None = None,
+        trace_value_ids: torch.Tensor | None = None,
         trace_value_mask: torch.Tensor | None = None,
         trace_weight: float = 0.5,
         trace_struct_weight: float = 1.0,
@@ -590,7 +597,7 @@ class MathJEPAReadout(nn.Module):
         trace_ids: torch.Tensor | None = None,
         trace_len: torch.Tensor | None = None,
         trace_op_ids: torch.Tensor | None = None,
-        trace_values: torch.Tensor | None = None,
+        trace_value_ids: torch.Tensor | None = None,
         trace_value_mask: torch.Tensor | None = None,
         trace_weight: float = 0.5,
         trace_struct_weight: float = 1.0,
@@ -602,7 +609,7 @@ class MathJEPAReadout(nn.Module):
             trace_ids=trace_ids,
             trace_len=trace_len,
             trace_op_ids=trace_op_ids,
-            trace_values=trace_values,
+            trace_value_ids=trace_value_ids,
             trace_value_mask=trace_value_mask,
             trace_weight=trace_weight,
             trace_struct_weight=trace_struct_weight,
@@ -629,7 +636,7 @@ class MathJEPAReadout(nn.Module):
             "trace_struct_op_loss",
             "trace_struct_value_loss",
             "trace_struct_op_acc",
-            "trace_struct_value_mae",
+            "trace_struct_value_acc",
         ]:
             if key in pred_out:
                 result[key] = pred_out[key]
@@ -637,13 +644,13 @@ class MathJEPAReadout(nn.Module):
 
     @torch.no_grad()
     def predict_structured_trace(
-        self, problem_ids: torch.Tensor, math_ids: torch.Tensor | None = None, value_scale: float = 1000.0
+        self, problem_ids: torch.Tensor, math_ids: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         slots = self.predict_trace_slots(problem_ids, math_ids)
         pred = self.trace_struct_head(slots.mean(dim=1))
         op_ids = pred[:, :8].view(-1, 2, 4).argmax(dim=-1)
-        values = pred[:, 8:] * value_scale
-        return op_ids, values
+        value_ids = pred[:, 8:].view(-1, 6, TRACE_VALUE_CLASSES).argmax(dim=-1)
+        return op_ids, value_ids
 
     @torch.no_grad()
     def solve_ids(

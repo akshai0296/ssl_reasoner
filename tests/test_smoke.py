@@ -88,7 +88,7 @@ def test_trace_respects_multiplication_precedence():
 def test_structured_trace_fields_respect_precedence():
     op_ids, values, mask = make_trace_fields("20+1*0")
     assert op_ids == [3, 1]
-    assert values == [1.0, 0.0, 0.0, 20.0, 0.0, 20.0]
+    assert values == [201, 200, 200, 220, 200, 220]
     assert mask == [1.0] * 6
 
 
@@ -123,7 +123,7 @@ def test_reasoning_trace_forward():
     trace_ids = torch.stack([item["trace_ids"] for item in batch])
     trace_len = torch.stack([item["trace_len"] for item in batch])
     trace_op_ids = torch.stack([item["trace_op_ids"] for item in batch])
-    trace_values = torch.stack([item["trace_values"] for item in batch])
+    trace_value_ids = torch.stack([item["trace_value_ids"] for item in batch])
     trace_value_mask = torch.stack([item["trace_value_mask"] for item in batch])
 
     model = MathJEPAReadout(
@@ -140,7 +140,7 @@ def test_reasoning_trace_forward():
         trace_ids=trace_ids,
         trace_len=trace_len,
         trace_op_ids=trace_op_ids,
-        trace_values=trace_values,
+        trace_value_ids=trace_value_ids,
         trace_value_mask=trace_value_mask,
     )
     decoded_trace = model.solve_trace_ids(problem_ids, pad_id=tokenizer.pad_id, math_ids=math_ids)

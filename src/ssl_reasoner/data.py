@@ -26,7 +26,9 @@ MATH_FEATURE_MINUS_ID = 203
 MATH_FEATURE_TIMES_ID = 204
 MATH_FEATURE_VOCAB_SIZE = 205
 TRACE_OP_TO_ID = {"none": 0, "+": 1, "-": 2, "*": 3}
-TRACE_VALUE_SCALE = 1000.0
+TRACE_VALUE_MIN = -200
+TRACE_VALUE_MAX = 1200
+TRACE_VALUE_CLASSES = TRACE_VALUE_MAX - TRACE_VALUE_MIN + 1
 
 
 def encode_math_features(problem: str, max_len: int = 8) -> list[int]:
@@ -66,14 +68,18 @@ def make_trace(expr: str) -> str:
     return f"{first_expr}={first_value} {second_expr}={second_value}"
 
 
-def make_trace_fields(expr: str) -> tuple[list[int], list[float], list[float]]:
+def _value_to_class(value: float) -> int:
+    return int(max(TRACE_VALUE_MIN, min(TRACE_VALUE_MAX, int(value)))) - TRACE_VALUE_MIN
+
+
+def make_trace_fields(expr: str) -> tuple[list[int], list[int], list[float]]:
     parts = re.split(r"([+\-*])", expr)
     if len(parts) == 3:
         a, op, b = parts
         value = eval(expr)
         return (
             [TRACE_OP_TO_ID[op], TRACE_OP_TO_ID["none"]],
-            [float(a), float(b), float(value), 0.0, 0.0, 0.0],
+            [_value_to_class(v) for v in [float(a), float(b), float(value), 0.0, 0.0, 0.0]],
             [1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
         )
 
@@ -81,7 +87,7 @@ def make_trace_fields(expr: str) -> tuple[list[int], list[float], list[float]]:
         value = eval(expr)
         return (
             [TRACE_OP_TO_ID["none"], TRACE_OP_TO_ID["none"]],
-            [float(value), 0.0, float(value), 0.0, 0.0, 0.0],
+            [_value_to_class(v) for v in [float(value), 0.0, float(value), 0.0, 0.0, 0.0]],
             [1.0, 0.0, 1.0, 0.0, 0.0, 0.0],
         )
 
@@ -105,14 +111,14 @@ def make_trace_fields(expr: str) -> tuple[list[int], list[float], list[float]]:
     second_value = eval(f"{int(second_lhs)}{second_op}{int(second_rhs)}")
     return (
         [TRACE_OP_TO_ID[first_op], TRACE_OP_TO_ID[second_op]],
-        [
+        [_value_to_class(v) for v in [
             first_lhs,
             first_rhs,
             float(first_value),
             second_lhs,
             second_rhs,
             float(second_value),
-        ],
+        ]],
         [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
     )
 
@@ -219,7 +225,7 @@ class MathDataset(Dataset):
             "trace_ids": torch.tensor(trace_ids, dtype=torch.long),
             "trace_len": torch.tensor(trace_len, dtype=torch.long),
             "trace_op_ids": torch.tensor(trace_op_ids, dtype=torch.long),
-            "trace_values": torch.tensor(trace_values, dtype=torch.float),
+            "trace_value_ids": torch.tensor(trace_values, dtype=torch.long),
             "trace_value_mask": torch.tensor(trace_value_mask, dtype=torch.float),
             "answer": ex.answer,
             "trace": ex.trace,

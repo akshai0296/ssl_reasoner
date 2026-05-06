@@ -77,21 +77,21 @@ def main() -> None:
     with torch.no_grad():
         for batch in loader:
             if args.mode == "trace_struct":
-                pred_ops, pred_values = model.predict_structured_trace(
+                pred_ops, pred_value_ids = model.predict_structured_trace(
                     batch["problem_ids"].to(device),
                     math_ids=batch["math_ids"].to(device),
                 )
                 op_ids = batch["trace_op_ids"].to(device)
-                value_targets = batch["trace_values"].to(device)
+                value_targets = batch["trace_value_ids"].to(device)
                 value_mask = batch["trace_value_mask"].to(device)
                 op_correct = int((pred_ops == op_ids).sum().item())
                 op_total = int(op_ids.numel())
-                value_error = float(((pred_values - value_targets).abs() * value_mask).sum().item())
+                value_correct = float(((pred_value_ids == value_targets).float() * value_mask).sum().item())
                 value_total = float(value_mask.sum().item())
                 correct += op_correct
                 total += op_total
-                counts = by_op.setdefault("value_mae", [0, 0])
-                counts[0] += value_error
+                counts = by_op.setdefault("value_acc", [0, 0])
+                counts[0] += value_correct
                 counts[1] += value_total
                 continue
             if args.mode == "pred":
@@ -130,9 +130,9 @@ def main() -> None:
                     print(f"{mark}: {problem} -> pred={pred!r} target={answer!r}")
                     shown += 1
     if args.mode == "trace_struct":
-        value_counts = by_op.pop("value_mae", [0, 1])
+        value_counts = by_op.pop("value_acc", [0, 1])
         print(f"trace_struct_op_acc={correct / max(total, 1):.3f} ({correct}/{total})")
-        print(f"trace_struct_value_mae={value_counts[0] / max(value_counts[1], 1):.3f}")
+        print(f"trace_struct_value_acc={value_counts[0] / max(value_counts[1], 1):.3f}")
         return
     print(f"{args.mode}_exact_match={correct / max(total, 1):.3f} ({correct}/{total})")
     for op_label, counts in sorted(by_op.items()):
