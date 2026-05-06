@@ -247,3 +247,45 @@ def test_trace_fusion_forward():
     assert out["loss"].ndim == 0
     assert out["pred_slots"].shape == (4, 8, 128)
     assert len(decoded) == 4
+
+
+def test_stage3_joint_forward():
+    tokenizer = build_math_tokenizer()
+    dataset = MathDataset(generate_math_examples(4), tokenizer)
+    batch = [dataset[i] for i in range(4)]
+    problem_ids = torch.stack([item["problem_ids"] for item in batch])
+    answer_ids = torch.stack([item["answer_ids"] for item in batch])
+    answer_len = torch.stack([item["answer_len"] for item in batch])
+    math_ids = torch.stack([item["math_ids"] for item in batch])
+    trace_ids = torch.stack([item["trace_ids"] for item in batch])
+    trace_len = torch.stack([item["trace_len"] for item in batch])
+    trace_op_ids = torch.stack([item["trace_op_ids"] for item in batch])
+    trace_value_ids = torch.stack([item["trace_value_ids"] for item in batch])
+    trace_value_mask = torch.stack([item["trace_value_mask"] for item in batch])
+    answer_value_id = torch.stack([item["answer_value_id"] for item in batch])
+
+    model = MathJEPAReadout(
+        vocab_size=tokenizer.vocab_size,
+        predictor_type="cross_attn",
+        use_math_features=True,
+        use_reasoning_trace=True,
+        use_trace_fusion=True,
+    )
+    out = model.stage3_joint(
+        problem_ids,
+        answer_ids,
+        answer_len,
+        math_ids=math_ids,
+        trace_ids=trace_ids,
+        trace_len=trace_len,
+        trace_op_ids=trace_op_ids,
+        trace_value_ids=trace_value_ids,
+        trace_value_mask=trace_value_mask,
+        answer_value_id=answer_value_id,
+    )
+
+    assert out["loss"].ndim == 0
+    assert out["pred_loss"].ndim == 0
+    assert out["token_loss"].ndim == 0
+    assert out["length_loss"].ndim == 0
+    assert out["pred_slots"].shape == (4, 8, 128)

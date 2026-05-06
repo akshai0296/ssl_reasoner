@@ -19,13 +19,20 @@ length in one forward pass.
 python -m ssl_reasoner.train --steps 50 --train-size 512 --val-size 128
 ```
 
-The `--steps` value is split across Stage 0/1/2 as 20%/50%/30%. For explicit control:
+The `--steps` value is split across Stage 0/1/2 as 20%/50%/30% by default.
+When `--stages 0,1,2,3` is used, it is split 20%/50%/20%/10%. For explicit control:
 
 ```bash
 python -m ssl_reasoner.train \
   --stage0-steps 200 \
   --stage1-steps 500 \
   --stage2-steps 300
+```
+
+Stage 3 joint fine-tuning follows the plan's combined latent + readout objective:
+
+```bash
+scripts/stage3_joint_from_structured_answer.sh
 ```
 
 ## Evaluate a Checkpoint

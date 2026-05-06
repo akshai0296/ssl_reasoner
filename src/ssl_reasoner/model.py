@@ -655,6 +655,100 @@ class MathJEPAReadout(nn.Module):
             "used_true_latent": use_true.float().mean(),
         }
 
+    def stage3_joint(
+        self,
+        problem_ids: torch.Tensor,
+        answer_ids: torch.Tensor,
+        answer_len: torch.Tensor,
+        math_ids: torch.Tensor | None = None,
+        trace_ids: torch.Tensor | None = None,
+        trace_len: torch.Tensor | None = None,
+        trace_op_ids: torch.Tensor | None = None,
+        trace_value_ids: torch.Tensor | None = None,
+        trace_value_mask: torch.Tensor | None = None,
+        answer_value_id: torch.Tensor | None = None,
+        pred_weight: float = 1.0,
+        contrastive_weight: float = 0.1,
+        vicreg_weight: float = 0.05,
+        token_weight: float = 0.5,
+        length_weight: float = 0.1,
+        trace_weight: float = 0.5,
+        trace_struct_weight: float = 1.0,
+        structured_answer_weight: float = 1.0,
+        slot_diversity_weight: float = 0.1,
+        batch_diversity_weight: float = 0.5,
+    ) -> dict[str, torch.Tensor]:
+        pred_out = self.stage1_predictor(
+            problem_ids,
+            answer_ids,
+            math_ids=math_ids,
+            trace_ids=trace_ids,
+            trace_len=trace_len,
+            trace_op_ids=trace_op_ids,
+            trace_value_ids=trace_value_ids,
+            trace_value_mask=trace_value_mask,
+            answer_value_id=answer_value_id,
+            trace_weight=trace_weight,
+            trace_struct_weight=trace_struct_weight,
+            structured_answer_weight=structured_answer_weight,
+            contrastive_weight=contrastive_weight,
+            vicreg_weight=vicreg_weight,
+            slot_diversity_weight=slot_diversity_weight,
+            batch_diversity_weight=batch_diversity_weight,
+        )
+        slots = self.predict_answer_slots(problem_ids, math_ids)
+        readout = self.readout(slots)
+        token_loss = F.cross_entropy(
+            readout["token_logits"].transpose(1, 2),
+            answer_ids,
+            ignore_index=0,
+        )
+        length_loss = F.cross_entropy(
+            readout["length_logits"], answer_len.clamp(max=answer_ids.size(1) - 1)
+        )
+        latent_loss = (
+            pred_weight * pred_out["pred_loss"]
+            + contrastive_weight * pred_out["contrastive_loss"]
+            + vicreg_weight * pred_out["vicreg_loss"]
+            + slot_diversity_weight * pred_out["slot_diversity_loss"]
+            + batch_diversity_weight * pred_out["batch_diversity_loss"]
+        )
+        aux_loss = pred_out["loss"] - (
+            pred_out["pred_loss"]
+            + contrastive_weight * pred_out["contrastive_loss"]
+            + vicreg_weight * pred_out["vicreg_loss"]
+            + slot_diversity_weight * pred_out["slot_diversity_loss"]
+            + batch_diversity_weight * pred_out["batch_diversity_loss"]
+        )
+        loss = latent_loss + aux_loss + token_weight * token_loss + length_weight * length_loss
+        result = {
+            "loss": loss,
+            "pred_loss": pred_out["pred_loss"],
+            "contrastive_loss": pred_out["contrastive_loss"],
+            "vicreg_loss": pred_out["vicreg_loss"],
+            "slot_diversity_loss": pred_out["slot_diversity_loss"],
+            "batch_diversity_loss": pred_out["batch_diversity_loss"],
+            "token_loss": token_loss,
+            "length_loss": length_loss,
+            "pred_slots": slots.detach(),
+        }
+        for key in [
+            "trace_pred_loss",
+            "trace_contrastive_loss",
+            "trace_token_loss",
+            "trace_length_loss",
+            "trace_pred_slots",
+            "trace_struct_op_loss",
+            "trace_struct_value_loss",
+            "trace_struct_op_acc",
+            "trace_struct_value_acc",
+            "structured_answer_loss",
+            "structured_answer_acc",
+        ]:
+            if key in pred_out:
+                result[key] = pred_out[key]
+        return result
+
     def forward(
         self,
         problem_ids: torch.Tensor,

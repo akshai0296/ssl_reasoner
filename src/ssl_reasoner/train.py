@@ -283,6 +283,29 @@ def run_stage(
                     true_latent_ratio=true_ratio,
                     target_readout_weight=args.target_readout_weight,
                 )
+            elif name == "stage3_joint":
+                out = model.stage3_joint(
+                    problem_ids,
+                    answer_ids,
+                    answer_len,
+                    math_ids=math_ids,
+                    trace_ids=trace_ids,
+                    trace_len=trace_len,
+                    trace_op_ids=trace_op_ids,
+                    trace_value_ids=trace_value_ids,
+                    trace_value_mask=trace_value_mask,
+                    answer_value_id=answer_value_id,
+                    pred_weight=args.joint_pred_weight,
+                    contrastive_weight=args.joint_contrastive_weight,
+                    vicreg_weight=args.joint_vicreg_weight,
+                    token_weight=args.joint_token_weight,
+                    length_weight=args.joint_length_weight,
+                    trace_weight=args.trace_weight,
+                    trace_struct_weight=args.trace_struct_weight,
+                    structured_answer_weight=args.structured_answer_weight,
+                    slot_diversity_weight=args.slot_diversity_weight,
+                    batch_diversity_weight=args.batch_diversity_weight,
+                )
             else:
                 raise ValueError(f"Unknown stage: {name}")
 
@@ -292,7 +315,7 @@ def run_stage(
             )
             optimizer.step()
 
-            if name == "stage0_target_warmup":
+            if name in {"stage0_target_warmup", "stage3_joint"}:
                 model.ema_update_target_encoder(args.ema_decay)
 
             step += 1
@@ -340,7 +363,7 @@ def run_stage(
                 breakdown = " ".join(part for part in [op_metrics, split_metrics] if part)
                 if breakdown:
                     print(f"  pred_breakdown {breakdown}")
-                if name == "stage1_predictor":
+                if name in {"stage1_predictor", "stage3_joint"}:
                     diag = latent_health(model, val_dataset, device, batch_size)
                     print(
                         "  latent_health "
@@ -365,10 +388,11 @@ def run_stage(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--steps", type=int, default=None, help="Total steps split 20/50/30.")
+    parser.add_argument("--steps", type=int, default=None, help="Total steps split 20/50/20/10.")
     parser.add_argument("--stage0-steps", type=int, default=None)
     parser.add_argument("--stage1-steps", type=int, default=None)
     parser.add_argument("--stage2-steps", type=int, default=None)
+    parser.add_argument("--stage3-steps", type=int, default=None)
     parser.add_argument("--train-size", type=int, default=5000)
     parser.add_argument("--val-size", type=int, default=500)
     parser.add_argument(
@@ -419,22 +443,38 @@ def main() -> None:
     parser.add_argument("--trace-weight", type=float, default=0.5)
     parser.add_argument("--trace-struct-weight", type=float, default=1.0)
     parser.add_argument("--structured-answer-weight", type=float, default=1.0)
+    parser.add_argument("--joint-pred-weight", type=float, default=1.0)
+    parser.add_argument("--joint-contrastive-weight", type=float, default=0.1)
+    parser.add_argument("--joint-vicreg-weight", type=float, default=0.05)
+    parser.add_argument("--joint-token-weight", type=float, default=0.5)
+    parser.add_argument("--joint-length-weight", type=float, default=0.1)
     parser.add_argument(
         "--stages",
         default="0,1,2",
-        help="Comma-separated stage ids to run. Use 0,1,2 for the plan pipeline.",
+        help="Comma-separated stage ids to run. Use 0,1,2,3 for the full plan pipeline.",
     )
     parser.add_argument("--grad-clip", type=float, default=1.0)
     args = parser.parse_args()
 
+    requested_stages = {stage.strip() for stage in args.stages.split(",") if stage.strip()}
     if args.steps is not None:
         args.stage0_steps = args.stage0_steps or max(1, int(args.steps * 0.2))
         args.stage1_steps = args.stage1_steps or max(1, int(args.steps * 0.5))
-        args.stage2_steps = args.stage2_steps or max(1, args.steps - args.stage0_steps - args.stage1_steps)
+        if "3" in requested_stages:
+            args.stage2_steps = args.stage2_steps or max(1, int(args.steps * 0.2))
+            args.stage3_steps = args.stage3_steps or max(
+                1, args.steps - args.stage0_steps - args.stage1_steps - args.stage2_steps
+            )
+        else:
+            args.stage2_steps = args.stage2_steps or max(
+                1, args.steps - args.stage0_steps - args.stage1_steps
+            )
+            args.stage3_steps = args.stage3_steps or 300
     else:
         args.stage0_steps = args.stage0_steps or 200
         args.stage1_steps = args.stage1_steps or 500
         args.stage2_steps = args.stage2_steps or 300
+        args.stage3_steps = args.stage3_steps or 300
 
     torch.manual_seed(args.seed)
     device = _device(args.device)
@@ -517,8 +557,6 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     best_acc = -1.0
-    requested_stages = {stage.strip() for stage in args.stages.split(",") if stage.strip()}
-
     if "0" in requested_stages:
         _set_trainable(model.problem_encoder, False)
         _set_trainable(model.predictor, False)
@@ -619,6 +657,53 @@ def main() -> None:
             device=device,
             optimizer=optimizer,
             steps=args.stage2_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
+
+    if "3" in requested_stages:
+        _set_trainable(model.problem_encoder, True)
+        _set_trainable(model.predictor, True)
+        _set_trainable(model.target_encoder, False)
+        _set_trainable(model.readout, True)
+        stage3_params = (
+            list(model.problem_encoder.parameters())
+            + list(model.predictor.parameters())
+            + list(model.readout.parameters())
+        )
+        if args.use_math_features:
+            stage3_params += list(model.math_embed.parameters())
+            stage3_params += [model.math_pos_embed]
+            stage3_params += list(model.math_norm.parameters())
+        if args.use_reasoning_trace:
+            _set_trainable(model.trace_target_encoder, False)
+            _set_trainable(model.trace_predictor, True)
+            _set_trainable(model.trace_readout, True)
+            _set_trainable(model.trace_struct_head, True)
+            _set_trainable(model.structured_answer_head, True)
+            stage3_params += list(model.trace_predictor.parameters())
+            stage3_params += list(model.trace_readout.parameters())
+            stage3_params += list(model.trace_struct_head.parameters())
+            stage3_params += list(model.structured_answer_head.parameters())
+            if args.use_trace_fusion:
+                _set_trainable(model.trace_struct_summary, True)
+                _set_trainable(model.trace_fusion, True)
+                stage3_params += list(model.trace_struct_summary.parameters())
+                stage3_params += list(model.trace_fusion.parameters())
+        optimizer = torch.optim.AdamW(stage3_params, lr=args.lr, weight_decay=0.01)
+        best_acc = run_stage(
+            name="stage3_joint",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.stage3_steps,
             batch_size=args.batch_size,
             eval_every=args.eval_every,
             sample_count=args.sample_count,
