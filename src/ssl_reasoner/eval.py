@@ -14,7 +14,7 @@ from .data import (
 )
 from .model import LatentVerifier, MathJEPAReadout
 from .tokenizer import build_math_tokenizer
-from .verifier import model_candidate_texts
+from .verifier import model_candidate_texts, operation_candidate_text
 
 
 def _device(name: str) -> torch.device:
@@ -42,6 +42,9 @@ def main() -> None:
             "trace",
             "trace_struct",
             "structured_answer",
+            "reasoning_ops",
+            "trace_ops",
+            "operation_solver",
             "fallback",
             "verifier",
         ],
@@ -109,6 +112,7 @@ def main() -> None:
     total = 0
     by_op: dict[str, list[int]] = {}
     by_split: dict[str, list[int]] = {}
+    by_pattern: dict[str, list[int]] = {}
     shown = 0
     with torch.no_grad():
         for batch in loader:
@@ -129,6 +133,60 @@ def main() -> None:
                 counts = by_op.setdefault("value_acc", [0, 0])
                 counts[0] += value_correct
                 counts[1] += value_total
+                continue
+            if args.mode in {"reasoning_ops", "trace_ops", "operation_solver"}:
+                problem_ids = batch["problem_ids"].to(device)
+                math_ids = batch["math_ids"].to(device)
+                if args.mode == "reasoning_ops":
+                    pred_ops, _ = model.predict_reasoning_struct(problem_ids, math_ids=math_ids)
+                elif args.mode == "trace_ops":
+                    pred_ops, _ = model.predict_structured_trace(problem_ids, math_ids=math_ids)
+                else:
+                    pred_ops, _ = model.predict_structured_trace(problem_ids, math_ids=math_ids)
+                op_predictions = [
+                    operation_candidate_text(problem, op_row)
+                    for problem, op_row in zip(batch["problem"], pred_ops.detach().cpu().tolist())
+                ]
+                if args.mode == "operation_solver":
+                    decoded = model.solve_ids(
+                        problem_ids,
+                        pad_id=tokenizer.pad_id,
+                        math_ids=math_ids,
+                    )
+                    readout_predictions = [tokenizer.decode(ids).strip() for ids in decoded]
+                    predictions = [
+                        op_pred if op_pred is not None else readout
+                        for op_pred, readout in zip(op_predictions, readout_predictions)
+                    ]
+                else:
+                    predictions = [op_pred or "" for op_pred in op_predictions]
+                references = batch["answer"]
+                for problem, pred, answer, op_label, split_label in zip(
+                    batch["problem"],
+                    predictions,
+                    references,
+                    batch["op_label"],
+                    batch["split_label"],
+                ):
+                    is_correct = pred == answer
+                    correct += is_correct
+                    total += 1
+                    counts = by_op.setdefault(str(op_label), [0, 0])
+                    counts[0] += int(is_correct)
+                    counts[1] += 1
+                    split_counts = by_split.setdefault(str(split_label), [0, 0])
+                    split_counts[0] += int(is_correct)
+                    split_counts[1] += 1
+                    pattern = "mixed_with_mul" if op_label == "mixed" and "*" in problem else (
+                        "mixed_without_mul" if op_label == "mixed" else str(op_label)
+                    )
+                    pattern_counts = by_pattern.setdefault(pattern, [0, 0])
+                    pattern_counts[0] += int(is_correct)
+                    pattern_counts[1] += 1
+                    if shown < 10:
+                        mark = "ok" if is_correct else "bad"
+                        print(f"{mark}: {problem} -> pred={pred!r} target={answer!r}")
+                        shown += 1
                 continue
             if args.mode in {"structured_answer", "fallback"}:
                 pred_ids, confidence = model.predict_structured_answer(
@@ -276,6 +334,9 @@ def main() -> None:
     for split_label, counts in sorted(by_split.items()):
         acc = counts[0] / max(counts[1], 1)
         print(f"{args.mode}_split_{split_label}_exact={acc:.3f} ({counts[0]}/{counts[1]})")
+    for pattern_label, counts in sorted(by_pattern.items()):
+        acc = counts[0] / max(counts[1], 1)
+        print(f"{args.mode}_pattern_{pattern_label}_exact={acc:.3f} ({counts[0]}/{counts[1]})")
 
 
 if __name__ == "__main__":
