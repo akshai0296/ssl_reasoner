@@ -111,6 +111,19 @@ CHECKPOINT=checkpoints/answer_value_head/best.pt MODES="answer_value" \
 In the current experiment, that head also stays near the direct readout accuracy, which
 supports the same conclusion: predicted answer latents are the bottleneck.
 
+To train the problem encoder/predictor harder toward the correct answer latent
+neighborhood, use:
+
+```bash
+bash scripts/finetune_predictor_answer_latent.sh
+CHECKPOINT=checkpoints/predictor_answer_latent/best.pt \
+  bash scripts/eval_latent_answer_diagnostics.sh
+```
+
+This fine-tune adds a supervised answer-latent contrastive loss. Samples with the same
+numeric answer are treated as positives instead of false negatives, while different
+answers remain negatives.
+
 ## Smoke Train
 
 ```bash

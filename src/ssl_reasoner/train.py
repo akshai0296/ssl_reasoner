@@ -286,6 +286,7 @@ def run_stage(
                     reasoning_struct_weight=args.reasoning_struct_weight,
                     structured_answer_weight=args.structured_answer_weight,
                     answer_value_weight=args.answer_value_weight,
+                    answer_contrastive_weight=args.answer_contrastive_weight,
                     contrastive_weight=args.contrastive_weight,
                     vicreg_weight=args.vicreg_weight,
                     slot_diversity_weight=args.slot_diversity_weight,
@@ -324,6 +325,7 @@ def run_stage(
                     reasoning_struct_weight=args.reasoning_struct_weight,
                     structured_answer_weight=args.structured_answer_weight,
                     answer_value_weight=args.answer_value_weight,
+                    answer_contrastive_weight=args.answer_contrastive_weight,
                     slot_diversity_weight=args.slot_diversity_weight,
                     batch_diversity_weight=args.batch_diversity_weight,
                 )
@@ -516,6 +518,7 @@ def main() -> None:
     parser.add_argument("--reasoning-struct-weight", type=float, default=0.1)
     parser.add_argument("--structured-answer-weight", type=float, default=1.0)
     parser.add_argument("--answer-value-weight", type=float, default=1.0)
+    parser.add_argument("--answer-contrastive-weight", type=float, default=0.0)
     parser.add_argument("--joint-pred-weight", type=float, default=1.0)
     parser.add_argument("--joint-contrastive-weight", type=float, default=0.1)
     parser.add_argument("--joint-vicreg-weight", type=float, default=0.05)
