@@ -57,6 +57,12 @@ The current best math-only recipe uses a mixed-heavy Stage 1 curriculum:
 scripts/predictor_reasoning_stage1_mixed_heavy.sh
 ```
 
+The strongest fixed-eval result so far adds stronger anti-collapse pressure:
+
+```bash
+scripts/predictor_reasoning_stage1_mixed_anticollapse.sh
+```
+
 Stage 4 trains the latent verifier on frozen Stage 3 latents:
 
 ```bash
