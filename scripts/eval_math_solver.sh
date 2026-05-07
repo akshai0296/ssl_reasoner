@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PYTHONPATH=src python -m ssl_reasoner.eval \
-  --checkpoint "${CHECKPOINT:-checkpoints/predictor_reasoning_stage1_mixed_anticollapse/best.pt}" \
+  --checkpoint "${CHECKPOINT:-checkpoints/trace_ops_head_mixed/best.pt}" \
   --mode operation_fallback \
   --samples "${SAMPLES:-500}" \
   --batch-size "${BATCH_SIZE:-64}" \

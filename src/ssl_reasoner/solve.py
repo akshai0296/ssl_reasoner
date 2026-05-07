@@ -11,7 +11,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--checkpoint",
-        default="checkpoints/predictor_reasoning_stage1_mixed_anticollapse/best.pt",
+        default="checkpoints/trace_ops_head_mixed/best.pt",
     )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--batch-size", type=int, default=64)

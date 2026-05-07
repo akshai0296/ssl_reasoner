@@ -194,7 +194,17 @@ def main() -> None:
                 else:
                     predictions = [op_pred or "" for op_pred in op_predictions]
                 references = batch["answer"]
-                for problem, pred, answer, op_label, split_label, op_row, conf_row in zip(
+                target_op_rows = batch["trace_op_ids"].tolist()
+                for (
+                    problem,
+                    pred,
+                    answer,
+                    op_label,
+                    split_label,
+                    op_row,
+                    conf_row,
+                    target_op_row,
+                ) in zip(
                     batch["problem"],
                     predictions,
                     references,
@@ -202,6 +212,7 @@ def main() -> None:
                     batch["split_label"],
                     op_rows,
                     confidence_rows,
+                    target_op_rows,
                 ):
                     is_correct = pred == answer
                     correct += is_correct
@@ -224,7 +235,8 @@ def main() -> None:
                         shown += 1
                     if not is_correct and errors_shown < args.dump_errors:
                         print(
-                            f"err: pattern={pattern} ops={op_row} op_conf={conf_row} "
+                            f"err: pattern={pattern} ops={op_row} target_ops={target_op_row} "
+                            f"op_conf={conf_row} "
                             f"{problem} -> pred={pred!r} target={answer!r}"
                         )
                         errors_shown += 1
