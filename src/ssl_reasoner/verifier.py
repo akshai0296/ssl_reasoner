@@ -18,6 +18,8 @@ from .data import (
 from .model import LatentVerifier, MathJEPAReadout
 from .tokenizer import build_math_tokenizer
 
+TRACE_ID_TO_OP = {0: "none", 1: "+", 2: "-", 3: "*"}
+
 
 def _device(name: str) -> torch.device:
     if name != "auto":
@@ -66,6 +68,45 @@ def _apply_op(lhs: int, op: str, rhs: int) -> int:
     if op == "*":
         return lhs * rhs
     raise ValueError(f"Unknown operator: {op}")
+
+
+def operation_candidate_text(
+    problem: str,
+    op_ids: list[int],
+) -> str | None:
+    match = re.search(r"\d+[+\-*]\d+(?:[+\-*]\d+)?", problem)
+    if match is None:
+        return None
+    expr = match.group(0)
+    parts = re.split(r"([+\-*])", expr)
+    ops = [TRACE_ID_TO_OP.get(int(idx), "none") for idx in op_ids]
+
+    if len(parts) == 3:
+        a, true_op, b = parts
+        op = ops[0] if ops and ops[0] != "none" else true_op
+        try:
+            return str(_apply_op(int(a), op, int(b)))
+        except ValueError:
+            return None
+
+    if len(parts) != 5:
+        return None
+
+    a_text, op1, b_text, op2, c_text = parts
+    a = int(a_text)
+    b = int(b_text)
+    c = int(c_text)
+    first_op = ops[0] if len(ops) > 0 and ops[0] != "none" else op1
+    second_op = ops[1] if len(ops) > 1 and ops[1] != "none" else op2
+
+    try:
+        if first_op == op2:
+            first_value = _apply_op(b, first_op, c)
+            return str(_apply_op(a, second_op, first_value))
+        first_value = _apply_op(a, first_op, b)
+        return str(_apply_op(first_value, second_op, c))
+    except ValueError:
+        return None
 
 
 def symbolic_candidate_texts(
@@ -175,9 +216,23 @@ def model_candidate_texts(
             candidate_texts.append(texts)
 
     if model.use_reasoning_trace:
-        _, reasoning_value_ids = model.predict_reasoning_struct(
+        reasoning_op_ids, reasoning_value_ids = model.predict_reasoning_struct(
             problem_ids, math_ids=math_ids
         )
+        reasoning_op_texts = [
+            operation_candidate_text(problem, op_row)
+            or base
+            for problem, op_row, base in zip(
+                batch["problem"],
+                reasoning_op_ids.detach().cpu().tolist(),
+                base_texts,
+            )
+        ]
+        candidate_slots.append(
+            encode_answer_strings(model, tokenizer, reasoning_op_texts, max_answer_len, device)
+        )
+        candidate_texts.append(reasoning_op_texts)
+
         reasoning_texts = [
             str(class_to_value(int(idx)))
             for idx in reasoning_value_ids[:, -1].detach().cpu().tolist()
@@ -196,7 +251,23 @@ def model_candidate_texts(
         )
         candidate_texts.append(structured_texts)
 
-        _, trace_value_ids = model.predict_structured_trace(problem_ids, math_ids=math_ids)
+        trace_op_ids, trace_value_ids = model.predict_structured_trace(
+            problem_ids, math_ids=math_ids
+        )
+        trace_op_texts = [
+            operation_candidate_text(problem, op_row)
+            or base
+            for problem, op_row, base in zip(
+                batch["problem"],
+                trace_op_ids.detach().cpu().tolist(),
+                base_texts,
+            )
+        ]
+        candidate_slots.append(
+            encode_answer_strings(model, tokenizer, trace_op_texts, max_answer_len, device)
+        )
+        candidate_texts.append(trace_op_texts)
+
         trace_texts = [
             str(class_to_value(int(idx))) for idx in trace_value_ids[:, -1].detach().cpu().tolist()
         ]

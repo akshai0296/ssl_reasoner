@@ -12,7 +12,7 @@ from ssl_reasoner.data import (
 from ssl_reasoner.diagnostics import latent_health
 from ssl_reasoner.model import LatentVerifier, MathJEPAReadout
 from ssl_reasoner.tokenizer import build_math_tokenizer
-from ssl_reasoner.verifier import symbolic_candidate_texts
+from ssl_reasoner.verifier import operation_candidate_text, symbolic_candidate_texts
 
 
 def test_forward_shapes():
@@ -154,6 +154,12 @@ def test_symbolic_candidate_texts_can_exclude_oracle_precedence_result():
     assert "14" not in candidates
     assert "20" in candidates
     assert "12" in candidates
+
+
+def test_operation_candidate_text_executes_predicted_operation_order():
+    assert operation_candidate_text("What is 2+3*4?", [3, 1]) == "14"
+    assert operation_candidate_text("What is 2+3*4?", [1, 3]) == "20"
+    assert operation_candidate_text("Calculate 9-4.", [2, 0]) == "5"
 
 
 def test_structured_trace_fields_respect_precedence():

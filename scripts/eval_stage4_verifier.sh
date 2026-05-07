@@ -7,7 +7,7 @@ PYTHONPATH=src python -m ssl_reasoner.eval \
   --mode verifier \
   --verifier-candidates 8 \
   --verifier-noise-scale 0.05 \
-  --candidate-set "${CANDIDATE_SET:-symbolic_full}" \
+  --candidate-set "${CANDIDATE_SET:-neural}" \
   --samples "${SAMPLES:-500}" \
   --batch-size "${BATCH_SIZE:-64}" \
   --curriculum mixed
