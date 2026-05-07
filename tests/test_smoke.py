@@ -11,6 +11,7 @@ from ssl_reasoner.data import (
 )
 from ssl_reasoner.diagnostics import latent_health
 from ssl_reasoner.model import LatentVerifier, MathJEPAReadout
+from ssl_reasoner.solver import solve_problem_texts
 from ssl_reasoner.tokenizer import build_math_tokenizer
 from ssl_reasoner.verifier import operation_candidate_text, symbolic_candidate_texts
 
@@ -162,6 +163,37 @@ def test_operation_candidate_text_executes_predicted_operation_order():
     assert operation_candidate_text("Calculate 9-4.", [2, 0]) == "5"
     assert operation_candidate_text("Calculate 9-4-2.", [2, 2]) == "3"
     assert operation_candidate_text("Calculate 9-4+2.", [2, 1]) == "7"
+
+
+def test_solve_problem_texts_uses_operation_then_readout_fallback():
+    tokenizer = build_math_tokenizer()
+
+    class FakeModel:
+        use_reasoning_trace = True
+
+        def solve_ids(self, problem_ids, pad_id, math_ids=None):
+            return [
+                tokenizer.encode("999", max_len=16),
+                tokenizer.encode("42", max_len=16),
+            ]
+
+        def predict_structured_trace(self, problem_ids, math_ids=None):
+            return torch.tensor([[3, 1], [1, 0]]), None
+
+    results = solve_problem_texts(
+        FakeModel(),
+        tokenizer,
+        ["What is 2+3*4?", "No expression here."],
+        torch.device("cpu"),
+        max_problem_len=64,
+        max_math_len=8,
+    )
+
+    assert results[0].answer == "14"
+    assert results[0].mode == "operation"
+    assert results[0].readout_answer == "999"
+    assert results[1].answer == "42"
+    assert results[1].mode == "readout"
 
 
 def test_structured_trace_fields_respect_precedence():
