@@ -79,6 +79,76 @@ Verifier evaluation includes symbolic math candidates: parsed precedence result,
 left-to-right result, intermediate operation values, and small variants around the readout
 answer.
 
+## Current Best Math Solver
+
+The strongest math-only path uses the model's predicted trace operation ids, executes
+those operations deterministically, and falls back to the readout only when no expression
+can be parsed. The current default checkpoint is:
+
+```text
+checkpoints/trace_ops_head_mixed/best.pt
+```
+
+That checkpoint is local and ignored by git. The repo tracks the commands and manifest
+needed to reproduce it, not the 28 MB weight file.
+
+Solve examples with:
+
+```bash
+bash scripts/solve_math.sh "What is 2+3*4?" "Calculate 15+33*4."
+```
+
+Show operation ids, operation confidence, operation answer, and readout answer:
+
+```bash
+bash scripts/solve_math.sh --debug "What is 2+3*4?"
+```
+
+Emit JSON:
+
+```bash
+bash scripts/solve_math.sh --json "What is 2+3*4?"
+```
+
+Evaluate the default math solver:
+
+```bash
+bash scripts/eval_math_solver.sh
+```
+
+Evaluate another curriculum:
+
+```bash
+CURRICULUM=mixed_only bash scripts/eval_math_solver.sh
+```
+
+Expected fixed 500-sample results for the current local best checkpoint:
+
+| Curriculum | Accuracy |
+| --- | ---: |
+| `mixed` | `1.000` |
+| `mixed_only` | `0.990` |
+| `seen_mixed` | `1.000` |
+| `unseen_mixed` | `0.998` |
+
+The checkpoint manifest is tracked at:
+
+```text
+reports/checkpoint_manifest.json
+```
+
+Rebuild the current best checkpoint and write a reproduction report:
+
+```bash
+bash scripts/reproduce_trace_ops_head.sh
+```
+
+If the checkpoint already exists locally and you only want to regenerate the report:
+
+```bash
+SKIP_TRAIN=1 bash scripts/reproduce_trace_ops_head.sh
+```
+
 ## Evaluate a Checkpoint
 
 ```bash
