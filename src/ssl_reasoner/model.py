@@ -8,6 +8,10 @@ import torch.nn.functional as F
 
 TRACE_VALUE_CLASSES = 1401
 TRACE_STATE_SCALE = 100.0
+MATH_FEATURE_NUM_OFFSET = 1
+MATH_FEATURE_PLUS_ID = 202
+MATH_FEATURE_MINUS_ID = 203
+MATH_FEATURE_TIMES_ID = 204
 
 
 class MeanPoolEncoder(nn.Module):
@@ -236,6 +240,129 @@ class LatentVerifier(nn.Module):
         return self.net(features).squeeze(-1)
 
 
+class StepwiseArithmeticStateHead(nn.Module):
+    def __init__(self, math_vocab_size: int, d_model: int, max_math_len: int):
+        super().__init__()
+        self.token_embed = nn.Embedding(math_vocab_size, d_model, padding_idx=0)
+        self.pos_embed = nn.Parameter(torch.randn(1, max_math_len, d_model) * 0.02)
+        self.summary = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+        )
+        self.op1_head = nn.Linear(d_model, 3)
+        self.op2_head = nn.Linear(d_model, 3)
+        self.order_head = nn.Linear(d_model, 2)
+
+    @staticmethod
+    def _numbers(math_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        values = (math_ids.float() - MATH_FEATURE_NUM_OFFSET).clamp(min=0.0)
+        a = values[:, 0]
+        b = values[:, 2]
+        c = values[:, 4]
+        return a, b, c
+
+    @staticmethod
+    def _apply_op(lhs: torch.Tensor, op_probs: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
+        candidates = torch.stack([lhs + rhs, lhs - rhs, lhs * rhs], dim=-1)
+        return (candidates * op_probs).sum(dim=-1)
+
+    @staticmethod
+    def _math_op_targets(math_ids: torch.Tensor) -> torch.Tensor:
+        op1 = (math_ids[:, 1] - MATH_FEATURE_PLUS_ID).clamp(min=0, max=2)
+        op2 = (math_ids[:, 3] - MATH_FEATURE_PLUS_ID).clamp(min=0, max=2)
+        return torch.stack([op1, op2], dim=-1)
+
+    @staticmethod
+    def _order_targets(trace_op_ids: torch.Tensor) -> torch.Tensor:
+        return (trace_op_ids[:, 0] == 3).long()
+
+    def forward(self, math_ids: torch.Tensor) -> dict[str, torch.Tensor]:
+        mask = math_ids.ne(0)
+        tokens = self.token_embed(math_ids) + self.pos_embed[:, : math_ids.size(1)]
+        denom = mask.sum(dim=1, keepdim=True).clamp(min=1).to(tokens.dtype)
+        pooled = (tokens * mask.unsqueeze(-1)).sum(dim=1) / denom
+        hidden = self.summary(pooled)
+
+        op1_logits = self.op1_head(hidden)
+        op2_logits = self.op2_head(hidden)
+        order_logits = self.order_head(hidden)
+        op_targets = self._math_op_targets(math_ids)
+        op1_probs = F.one_hot(op_targets[:, 0], num_classes=3).to(hidden.dtype)
+        op2_probs = F.one_hot(op_targets[:, 1], num_classes=3).to(hidden.dtype)
+        order_probs = order_logits.softmax(dim=-1)
+
+        a, b, c = self._numbers(math_ids)
+        left_first = self._apply_op(a, op1_probs, b)
+        left_final = self._apply_op(left_first, op2_probs, c)
+        right_first = self._apply_op(b, op2_probs, c)
+        right_final = self._apply_op(a, op1_probs, right_first)
+        mixed = math_ids[:, 3].ne(0).to(left_first.dtype)
+        first = torch.where(
+            mixed.bool(),
+            order_probs[:, 0] * left_first + order_probs[:, 1] * right_first,
+            left_first,
+        )
+        final = torch.where(
+            mixed.bool(),
+            order_probs[:, 0] * left_final + order_probs[:, 1] * right_final,
+            left_first,
+        )
+        values = torch.stack([first, final], dim=-1)
+        return {
+            "values": values,
+            "op1_logits": op1_logits,
+            "op2_logits": op2_logits,
+            "order_logits": order_logits,
+        }
+
+    def loss(
+        self,
+        math_ids: torch.Tensor,
+        trace_state_values: torch.Tensor,
+        trace_state_mask: torch.Tensor,
+        trace_op_ids: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        out = self(math_ids)
+        values = out["values"]
+        value_loss = F.smooth_l1_loss(
+            values / TRACE_STATE_SCALE,
+            trace_state_values / TRACE_STATE_SCALE,
+            reduction="none",
+        )
+        value_loss = (value_loss * trace_state_mask).sum() / trace_state_mask.sum().clamp(min=1.0)
+        op_targets = self._math_op_targets(math_ids)
+        op_loss = F.cross_entropy(out["op1_logits"], op_targets[:, 0])
+        has_second = trace_state_mask[:, 1].bool()
+        if has_second.any():
+            op_loss = op_loss + F.cross_entropy(
+                out["op2_logits"][has_second],
+                op_targets[:, 1][has_second],
+            )
+            order_loss = F.cross_entropy(
+                out["order_logits"][has_second],
+                self._order_targets(trace_op_ids)[has_second],
+            )
+        else:
+            order_loss = value_loss.new_tensor(0.0)
+        final_target = torch.where(
+            trace_state_mask[:, 1].bool(),
+            trace_state_values[:, 1],
+            trace_state_values[:, 0],
+        )
+        final_pred = torch.where(trace_state_mask[:, 1].bool(), values[:, 1], values[:, 0])
+        final_acc = (final_pred.round() == final_target).float().mean()
+        return {
+            "loss": value_loss + op_loss + order_loss,
+            "step_state_value_loss": value_loss,
+            "step_state_op_loss": op_loss,
+            "step_state_order_loss": order_loss,
+            "step_state_final_acc": final_acc,
+        }
+
+
 class MathJEPAReadout(nn.Module):
     def __init__(
         self,
@@ -268,6 +395,9 @@ class MathJEPAReadout(nn.Module):
             self.math_embed = nn.Embedding(math_vocab_size, d_model, padding_idx=0)
             self.math_pos_embed = nn.Parameter(torch.randn(1, max_math_len, d_model) * 0.02)
             self.math_norm = nn.LayerNorm(d_model)
+        self.step_state_head = StepwiseArithmeticStateHead(
+            math_vocab_size, d_model, max_math_len
+        )
         self.target_encoder = SlotTargetEncoder(
             vocab_size, d_model, max_answer_len, num_slots, num_heads=num_heads
         )
@@ -564,6 +694,20 @@ class MathJEPAReadout(nn.Module):
             "trace_state_regression_acc": acc,
             "trace_state_final_acc": final_acc,
         }
+
+    def step_state_loss(
+        self,
+        math_ids: torch.Tensor,
+        trace_state_values: torch.Tensor,
+        trace_state_mask: torch.Tensor,
+        trace_op_ids: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        return self.step_state_head.loss(
+            math_ids,
+            trace_state_values,
+            trace_state_mask,
+            trace_op_ids,
+        )
 
     def answer_value_loss(
         self, slots: torch.Tensor, answer_value_id: torch.Tensor
@@ -1078,6 +1222,12 @@ class MathJEPAReadout(nn.Module):
     ) -> torch.Tensor:
         trace_slots = self.predict_trace_slots(problem_ids, math_ids)
         return self.trace_state_regression_head(trace_slots.mean(dim=1)) * TRACE_STATE_SCALE
+
+    @torch.no_grad()
+    def predict_step_state_values(
+        self, math_ids: torch.Tensor
+    ) -> torch.Tensor:
+        return self.step_state_head(math_ids)["values"]
 
     @torch.no_grad()
     def predict_answer_value(

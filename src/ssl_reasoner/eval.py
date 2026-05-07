@@ -18,6 +18,7 @@ from .model import LatentVerifier, MathJEPAReadout
 from .solver import (
     operation_confidence_count,
     predict_trace_operation_ids,
+    predict_step_state_answers,
     predict_trace_state_answers,
     predict_trace_state_regression_answers,
 )
@@ -58,6 +59,7 @@ def main() -> None:
             "trace_ops",
             "trace_state_solver",
             "trace_state_regression",
+            "step_state_solver",
             "operation_solver",
             "operation_fallback",
             "fallback",
@@ -172,6 +174,7 @@ def main() -> None:
                 "trace_ops",
                 "trace_state_solver",
                 "trace_state_regression",
+                "step_state_solver",
                 "operation_solver",
                 "operation_fallback",
             }:
@@ -209,6 +212,13 @@ def main() -> None:
                             math_ids,
                             list(batch["problem"]),
                         )
+                    )
+                    predictions = [pred or "" for pred in state_predictions]
+                elif args.mode == "step_state_solver":
+                    state_predictions, state_confidences = predict_step_state_answers(
+                        model,
+                        math_ids,
+                        list(batch["problem"]),
                     )
                     predictions = [pred or "" for pred in state_predictions]
                 elif args.mode in {"operation_solver", "operation_fallback"}:

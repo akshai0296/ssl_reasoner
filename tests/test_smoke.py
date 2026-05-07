@@ -258,6 +258,33 @@ def test_trace_state_targets_keep_unclamped_final_values():
     assert mask == [1.0, 1.0]
 
 
+def test_step_state_head_forward_and_loss():
+    tokenizer = build_math_tokenizer()
+    dataset = MathDataset(generate_math_examples(4, seed=3, curriculum="mixed_only"), tokenizer)
+    batch = [dataset[i] for i in range(4)]
+    math_ids = torch.stack([item["math_ids"] for item in batch])
+    trace_state_values = torch.stack([item["trace_state_values"] for item in batch])
+    trace_state_mask = torch.stack([item["trace_state_mask"] for item in batch])
+    trace_op_ids = torch.stack([item["trace_op_ids"] for item in batch])
+
+    model = MathJEPAReadout(
+        vocab_size=tokenizer.vocab_size,
+        use_math_features=True,
+        use_reasoning_trace=True,
+    )
+    values = model.predict_step_state_values(math_ids)
+    out = model.step_state_loss(
+        math_ids,
+        trace_state_values,
+        trace_state_mask,
+        trace_op_ids,
+    )
+
+    assert values.shape == (4, 2)
+    assert out["loss"].ndim == 0
+    assert out["step_state_final_acc"].ndim == 0
+
+
 def test_cross_attention_with_math_features_forward():
     tokenizer = build_math_tokenizer()
     dataset = MathDataset(generate_math_examples(4), tokenizer)

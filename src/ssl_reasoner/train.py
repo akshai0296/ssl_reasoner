@@ -199,6 +199,23 @@ def evaluate_trace_state_final(model, dataset, device, batch_size: int) -> float
 
 
 @torch.no_grad()
+def evaluate_step_state_final(model, dataset, device, batch_size: int) -> float:
+    model.eval()
+    loader = DataLoader(dataset, batch_size=batch_size)
+    correct = 0
+    total = 0
+    for batch in loader:
+        pred = model.predict_step_state_values(batch["math_ids"].to(device)).round()
+        values = batch["trace_state_values"].to(device)
+        mask = batch["trace_state_mask"].to(device)
+        final_target = torch.where(mask[:, 1].bool(), values[:, 1], values[:, 0])
+        final_pred = torch.where(mask[:, 1].bool(), pred[:, 1], pred[:, 0])
+        correct += int((final_pred == final_target).sum().item())
+        total += int(final_target.numel())
+    return correct / max(total, 1)
+
+
+@torch.no_grad()
 def format_samples(
     model,
     dataset,
@@ -397,6 +414,13 @@ def run_stage(
                     trace_state_values,
                     trace_state_mask,
                 )
+            elif name == "step_state_head":
+                out = model.step_state_loss(
+                    math_ids,
+                    trace_state_values,
+                    trace_state_mask,
+                    trace_op_ids,
+                )
             elif name == "answer_value_head":
                 with torch.no_grad():
                     slots = model.predict_answer_slots(problem_ids, math_ids)
@@ -433,6 +457,9 @@ def run_stage(
                 trace_state_final_acc = evaluate_trace_state_final(
                     model, val_dataset, device, batch_size
                 )
+                step_state_final_acc = evaluate_step_state_final(
+                    model, val_dataset, device, batch_size
+                )
                 metrics = " ".join(
                     f"{key}={value.item():.4f}"
                     for key, value in out.items()
@@ -445,6 +472,7 @@ def run_stage(
                         "structured_answer_acc",
                         "trace_state_regression_acc",
                         "trace_state_final_acc",
+                        "step_state_final_acc",
                         "answer_value_acc",
                     }
                 )
@@ -456,7 +484,8 @@ def run_stage(
                     f"trace_struct_value_acc={trace_struct['trace_struct_value_acc']:.3f} "
                     f"structured_answer_acc={structured_answer_acc:.3f} "
                     f"answer_value_acc={answer_value_acc:.3f} "
-                    f"trace_state_final_acc={trace_state_final_acc:.3f}"
+                    f"trace_state_final_acc={trace_state_final_acc:.3f} "
+                    f"step_state_final_acc={step_state_final_acc:.3f}"
                 )
                 op_metrics = " ".join(
                     f"{key}={value:.3f}"
@@ -477,6 +506,7 @@ def run_stage(
                     "reasoning_head",
                     "trace_ops_head",
                     "trace_state_head",
+                    "step_state_head",
                     "answer_value_head",
                 }:
                     diag = latent_health(model, val_dataset, device, batch_size)
@@ -938,6 +968,30 @@ def main() -> None:
         )
         best_acc = run_stage(
             name="trace_state_head",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.trace_ops_head_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
+
+    if "step_state_head" in requested_stages or "ssh" in requested_stages:
+        for module in model.children():
+            _set_trainable(module, False)
+        _set_trainable(model.step_state_head, True)
+        optimizer = torch.optim.AdamW(
+            model.step_state_head.parameters(), lr=args.lr, weight_decay=0.01
+        )
+        best_acc = run_stage(
+            name="step_state_head",
             model=model,
             loader=loader,
             val_dataset=val_dataset,

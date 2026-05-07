@@ -198,6 +198,27 @@ def predict_trace_state_regression_answers(
 
 
 @torch.no_grad()
+def predict_step_state_answers(
+    model: MathJEPAReadout,
+    math_ids: torch.Tensor,
+    problems: list[str],
+) -> tuple[list[str | None], list[float]]:
+    values = model.predict_step_state_values(math_ids)
+    answers: list[str | None] = []
+    confidences: list[float] = []
+    for problem, row in zip(problems, values.detach().cpu()):
+        final_idx = trace_final_value_index(problem)
+        if final_idx is None:
+            answers.append(None)
+            confidences.append(0.0)
+            continue
+        state_idx = 1 if final_idx == 5 else 0
+        answers.append(str(int(round(float(row[state_idx].item())))))
+        confidences.append(1.0)
+    return answers, confidences
+
+
+@torch.no_grad()
 def solve_problem_texts(
     model: MathJEPAReadout,
     tokenizer: CharTokenizer,

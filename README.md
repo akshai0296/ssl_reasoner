@@ -162,6 +162,20 @@ CHECKPOINT=checkpoints/trace_state_joint/best.pt bash scripts/eval_trace_state_r
 Current result: this improves the mixed direct readout somewhat, but the learned
 continuous final-state path is still not exact enough to replace the operation solver.
 
+The step-wise state solver uses an operator-conditioned transition cell with learned
+execution-order routing:
+
+```bash
+bash scripts/train_step_state_solver.sh
+bash scripts/eval_step_state_solver.sh
+CURRICULUM=mixed_only bash scripts/eval_step_state_solver.sh
+```
+
+Current result with `checkpoints/step_state_solver_mixed_only/best.pt`: `1.000` on
+`mixed` and `1.000` on `mixed_only` for the supported one- and two-operation expression
+format. This path answers from predicted intermediate/final states rather than the
+decoder's answer-token readout.
+
 ## Smoke Train
 
 ```bash
