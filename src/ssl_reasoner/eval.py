@@ -46,6 +46,7 @@ def main() -> None:
             "reasoning_ops",
             "trace_ops",
             "operation_solver",
+            "operation_fallback",
             "fallback",
             "verifier",
         ],
@@ -136,7 +137,12 @@ def main() -> None:
                 counts[0] += value_correct
                 counts[1] += value_total
                 continue
-            if args.mode in {"reasoning_ops", "trace_ops", "operation_solver"}:
+            if args.mode in {
+                "reasoning_ops",
+                "trace_ops",
+                "operation_solver",
+                "operation_fallback",
+            }:
                 problem_ids = batch["problem_ids"].to(device)
                 math_ids = batch["math_ids"].to(device)
                 if args.mode == "reasoning_ops":
@@ -150,7 +156,7 @@ def main() -> None:
                     operation_candidate_text(problem, op_row)
                     for problem, op_row in zip(batch["problem"], op_rows)
                 ]
-                if args.mode == "operation_solver":
+                if args.mode in {"operation_solver", "operation_fallback"}:
                     decoded = model.solve_ids(
                         problem_ids,
                         pad_id=tokenizer.pad_id,
