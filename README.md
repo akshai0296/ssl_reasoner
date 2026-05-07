@@ -13,6 +13,68 @@ The first target is intentionally narrow and math-only:
 No autoregressive generation is used. The readout predicts all token positions and answer
 length in one forward pass.
 
+## Architecture Flow
+
+The model has two answer paths. The original latent readout path predicts an answer
+embedding and decodes it into tokens with a decoder trained from scratch:
+
+```text
+problem text
+  -> tokenizer + math feature extractor
+  -> problem encoder
+  -> answer-slot predictor
+  -> predicted answer latent slots
+  -> ParallelReadoutDecoder
+  -> answer tokens
+```
+
+The decoder is not a pretrained language model. It is a small local transformer decoder
+that learns to map answer latent slots to numeric answer strings during Stage 0, Stage 2,
+and Stage 3.
+
+The current best math solver uses the interpretable trace-operation path:
+
+```text
+problem text
+  -> tokenizer + math feature extractor
+  -> problem encoder
+  -> trace predictor
+  -> trace operation head
+  -> predicted operation ids
+  -> deterministic operation executor
+  -> final answer
+```
+
+Operation ids are:
+
+```text
+0 = none
+1 = +
+2 = -
+3 = *
+```
+
+Example:
+
+```text
+input:  "What is 2+3*4?"
+ops:    [3, 1]
+trace:  3*4 = 12, then 2+12 = 14
+answer: 14
+```
+
+With debug output:
+
+```bash
+bash scripts/solve_math.sh --debug "What is 2+3*4?"
+```
+
+You can inspect:
+
+```text
+answer, mode, predicted operation ids, operation confidences, operation answer, readout answer
+```
+
 ## Smoke Train
 
 ```bash
