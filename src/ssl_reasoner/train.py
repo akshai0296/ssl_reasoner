@@ -160,6 +160,23 @@ def evaluate_structured_answer(model, dataset, device, batch_size: int) -> float
 
 
 @torch.no_grad()
+def evaluate_answer_value(model, dataset, device, batch_size: int) -> float:
+    model.eval()
+    loader = DataLoader(dataset, batch_size=batch_size)
+    correct = 0
+    total = 0
+    for batch in loader:
+        pred_ids, _ = model.predict_answer_value(
+            batch["problem_ids"].to(device),
+            math_ids=batch["math_ids"].to(device),
+        )
+        target_ids = batch["answer_value_id"].to(device)
+        correct += int((pred_ids == target_ids).sum().item())
+        total += int(target_ids.numel())
+    return correct / max(total, 1)
+
+
+@torch.no_grad()
 def format_samples(
     model,
     dataset,
@@ -268,6 +285,7 @@ def run_stage(
                     trace_struct_weight=args.trace_struct_weight,
                     reasoning_struct_weight=args.reasoning_struct_weight,
                     structured_answer_weight=args.structured_answer_weight,
+                    answer_value_weight=args.answer_value_weight,
                     contrastive_weight=args.contrastive_weight,
                     vicreg_weight=args.vicreg_weight,
                     slot_diversity_weight=args.slot_diversity_weight,
@@ -305,6 +323,7 @@ def run_stage(
                     trace_struct_weight=args.trace_struct_weight,
                     reasoning_struct_weight=args.reasoning_struct_weight,
                     structured_answer_weight=args.structured_answer_weight,
+                    answer_value_weight=args.answer_value_weight,
                     slot_diversity_weight=args.slot_diversity_weight,
                     batch_diversity_weight=args.batch_diversity_weight,
                 )
@@ -326,6 +345,10 @@ def run_stage(
                     trace_value_ids,
                     trace_value_mask,
                 )
+            elif name == "answer_value_head":
+                with torch.no_grad():
+                    slots = model.predict_answer_slots(problem_ids, math_ids)
+                out = model.answer_value_loss(slots, answer_value_id)
             else:
                 raise ValueError(f"Unknown stage: {name}")
 
@@ -352,6 +375,9 @@ def run_stage(
                 structured_answer_acc = evaluate_structured_answer(
                     model, val_dataset, device, batch_size
                 )
+                answer_value_acc = evaluate_answer_value(
+                    model, val_dataset, device, batch_size
+                )
                 metrics = " ".join(
                     f"{key}={value.item():.4f}"
                     for key, value in out.items()
@@ -362,6 +388,7 @@ def run_stage(
                         "reasoning_struct_op_acc",
                         "reasoning_struct_value_acc",
                         "structured_answer_acc",
+                        "answer_value_acc",
                     }
                 )
                 print(
@@ -370,7 +397,8 @@ def run_stage(
                     f"trace_exact={trace_acc:.3f} "
                     f"trace_struct_op_acc={trace_struct['trace_struct_op_acc']:.3f} "
                     f"trace_struct_value_acc={trace_struct['trace_struct_value_acc']:.3f} "
-                    f"structured_answer_acc={structured_answer_acc:.3f}"
+                    f"structured_answer_acc={structured_answer_acc:.3f} "
+                    f"answer_value_acc={answer_value_acc:.3f}"
                 )
                 op_metrics = " ".join(
                     f"{key}={value:.3f}"
@@ -390,6 +418,7 @@ def run_stage(
                     "stage3_joint",
                     "reasoning_head",
                     "trace_ops_head",
+                    "answer_value_head",
                 }:
                     diag = latent_health(model, val_dataset, device, batch_size)
                     print(
@@ -422,6 +451,7 @@ def main() -> None:
     parser.add_argument("--stage3-steps", type=int, default=None)
     parser.add_argument("--reasoning-head-steps", type=int, default=None)
     parser.add_argument("--trace-ops-head-steps", type=int, default=None)
+    parser.add_argument("--answer-value-head-steps", type=int, default=None)
     parser.add_argument("--train-size", type=int, default=5000)
     parser.add_argument("--val-size", type=int, default=500)
     parser.add_argument(
@@ -485,6 +515,7 @@ def main() -> None:
     parser.add_argument("--trace-struct-weight", type=float, default=1.0)
     parser.add_argument("--reasoning-struct-weight", type=float, default=0.1)
     parser.add_argument("--structured-answer-weight", type=float, default=1.0)
+    parser.add_argument("--answer-value-weight", type=float, default=1.0)
     parser.add_argument("--joint-pred-weight", type=float, default=1.0)
     parser.add_argument("--joint-contrastive-weight", type=float, default=0.1)
     parser.add_argument("--joint-vicreg-weight", type=float, default=0.05)
@@ -519,6 +550,7 @@ def main() -> None:
         args.stage3_steps = args.stage3_steps or 300
         args.reasoning_head_steps = args.reasoning_head_steps or 500
         args.trace_ops_head_steps = args.trace_ops_head_steps or 500
+        args.answer_value_head_steps = args.answer_value_head_steps or 500
 
     torch.manual_seed(args.seed)
     device = _device(args.device)
@@ -645,10 +677,12 @@ def main() -> None:
         _set_trainable(model.target_encoder, False)
         _set_trainable(model.readout, False)
         _set_trainable(model.reasoning_struct_head, True)
+        _set_trainable(model.answer_value_head, True)
         stage1_params = (
             list(model.problem_encoder.parameters())
             + list(model.predictor.parameters())
             + list(model.reasoning_struct_head.parameters())
+            + list(model.answer_value_head.parameters())
         )
         if args.use_math_features:
             stage1_params += list(model.math_embed.parameters())
@@ -729,11 +763,13 @@ def main() -> None:
         _set_trainable(model.target_encoder, False)
         _set_trainable(model.readout, True)
         _set_trainable(model.reasoning_struct_head, True)
+        _set_trainable(model.answer_value_head, True)
         stage3_params = (
             list(model.problem_encoder.parameters())
             + list(model.predictor.parameters())
             + list(model.readout.parameters())
             + list(model.reasoning_struct_head.parameters())
+            + list(model.answer_value_head.parameters())
         )
         if args.use_math_features:
             stage3_params += list(model.math_embed.parameters())
@@ -814,6 +850,30 @@ def main() -> None:
             device=device,
             optimizer=optimizer,
             steps=args.trace_ops_head_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
+
+    if "answer_value_head" in requested_stages or "avh" in requested_stages:
+        for module in model.children():
+            _set_trainable(module, False)
+        _set_trainable(model.answer_value_head, True)
+        optimizer = torch.optim.AdamW(
+            model.answer_value_head.parameters(), lr=args.lr, weight_decay=0.01
+        )
+        best_acc = run_stage(
+            name="answer_value_head",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.answer_value_head_steps,
             batch_size=args.batch_size,
             eval_every=args.eval_every,
             sample_count=args.sample_count,

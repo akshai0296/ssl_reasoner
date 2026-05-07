@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from .data import (
     CURRICULA,
     MATH_FEATURE_VOCAB_SIZE,
     MathDataset,
+    TRACE_VALUE_CLASSES,
     class_to_value,
     generate_math_examples,
 )
@@ -45,6 +47,8 @@ def main() -> None:
             "trace",
             "trace_struct",
             "structured_answer",
+            "answer_value",
+            "latent_nn",
             "reasoning_ops",
             "trace_ops",
             "operation_solver",
@@ -95,6 +99,23 @@ def main() -> None:
     model.load_state_dict(ckpt["model"], strict=False)
     model.eval()
     verifier = None
+    latent_nn_texts = None
+    latent_nn_slots = None
+    latent_nn_values = None
+    if args.mode == "latent_nn":
+        latent_nn_values = [class_to_value(idx) for idx in range(TRACE_VALUE_CLASSES)]
+        latent_nn_texts = [str(value) for value in latent_nn_values]
+        latent_ids = torch.tensor(
+            [
+                tokenizer.encode(text, train_args["max_answer_len"])
+                for text in latent_nn_texts
+            ],
+            dtype=torch.long,
+            device=device,
+        )
+        with torch.no_grad():
+            latent_nn_slots = model.encode_target(latent_ids, use_ema=True)
+            latent_nn_slots = F.normalize(latent_nn_slots.flatten(start_dim=1), dim=-1)
     if args.mode == "verifier":
         if args.verifier_checkpoint is None:
             raise ValueError("--verifier-checkpoint is required for --mode verifier")
@@ -240,6 +261,69 @@ def main() -> None:
                             f"{problem} -> pred={pred!r} target={answer!r}"
                         )
                         errors_shown += 1
+                continue
+            if args.mode == "answer_value":
+                pred_ids, confidence = model.predict_answer_value(
+                    batch["problem_ids"].to(device),
+                    math_ids=batch["math_ids"].to(device),
+                )
+                predictions = [str(class_to_value(int(idx))) for idx in pred_ids.tolist()]
+                references = batch["answer"]
+                for problem, pred, answer, op_label, split_label, conf in zip(
+                    batch["problem"],
+                    predictions,
+                    references,
+                    batch["op_label"],
+                    batch["split_label"],
+                    confidence,
+                ):
+                    is_correct = pred == answer
+                    correct += is_correct
+                    total += 1
+                    counts = by_op.setdefault(str(op_label), [0, 0])
+                    counts[0] += int(is_correct)
+                    counts[1] += 1
+                    split_counts = by_split.setdefault(str(split_label), [0, 0])
+                    split_counts[0] += int(is_correct)
+                    split_counts[1] += 1
+                    if shown < 10:
+                        mark = "ok" if is_correct else "bad"
+                        print(
+                            f"{mark}: {problem} -> pred={pred!r} "
+                            f"target={answer!r} confidence={float(conf):.3f}"
+                        )
+                        shown += 1
+                continue
+            if args.mode == "latent_nn":
+                assert latent_nn_slots is not None
+                assert latent_nn_values is not None
+                problem_ids = batch["problem_ids"].to(device)
+                math_ids = batch["math_ids"].to(device)
+                pred_slots = model.predict_answer_slots(problem_ids, math_ids)
+                pred_flat = F.normalize(pred_slots.flatten(start_dim=1), dim=-1)
+                nearest = (pred_flat @ latent_nn_slots.T).argmax(dim=-1)
+                predictions = [str(latent_nn_values[int(idx)]) for idx in nearest.tolist()]
+                references = batch["answer"]
+                for problem, pred, answer, op_label, split_label in zip(
+                    batch["problem"],
+                    predictions,
+                    references,
+                    batch["op_label"],
+                    batch["split_label"],
+                ):
+                    is_correct = pred == answer
+                    correct += is_correct
+                    total += 1
+                    counts = by_op.setdefault(str(op_label), [0, 0])
+                    counts[0] += int(is_correct)
+                    counts[1] += 1
+                    split_counts = by_split.setdefault(str(split_label), [0, 0])
+                    split_counts[0] += int(is_correct)
+                    split_counts[1] += 1
+                    if shown < 10:
+                        mark = "ok" if is_correct else "bad"
+                        print(f"{mark}: {problem} -> pred={pred!r} target={answer!r}")
+                        shown += 1
                 continue
             if args.mode in {"structured_answer", "fallback"}:
                 pred_ids, confidence = model.predict_structured_answer(

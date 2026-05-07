@@ -299,6 +299,12 @@ class MathJEPAReadout(nn.Module):
             nn.GELU(),
             nn.Linear(d_model, 8 + 2 * TRACE_VALUE_CLASSES),
         )
+        self.answer_value_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, TRACE_VALUE_CLASSES),
+        )
         if use_reasoning_trace:
             self.trace_predictor = CrossAttentionSequencePredictor(
                 d_model, num_slots, num_layers=predictor_layers, num_heads=num_heads
@@ -524,6 +530,18 @@ class MathJEPAReadout(nn.Module):
             "structured_answer_acc": acc,
         }
 
+    def answer_value_loss(
+        self, slots: torch.Tensor, answer_value_id: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        logits = self.answer_value_head(slots.mean(dim=1))
+        loss = F.cross_entropy(logits, answer_value_id)
+        acc = (logits.argmax(dim=-1) == answer_value_id).float().mean()
+        return {
+            "loss": loss,
+            "answer_value_loss": loss,
+            "answer_value_acc": acc,
+        }
+
     @staticmethod
     def info_nce_loss(pred_slots: torch.Tensor, target_slots: torch.Tensor, temp: float = 0.07):
         pred = F.normalize(pred_slots.flatten(start_dim=1), dim=-1)
@@ -603,6 +621,7 @@ class MathJEPAReadout(nn.Module):
         trace_struct_weight: float = 1.0,
         reasoning_struct_weight: float = 1.0,
         structured_answer_weight: float = 1.0,
+        answer_value_weight: float = 1.0,
         contrastive_weight: float = 0.1,
         vicreg_weight: float = 0.05,
         slot_diversity_weight: float = 0.1,
@@ -659,6 +678,11 @@ class MathJEPAReadout(nn.Module):
             result["reasoning_struct_value_acc"] = reasoning_struct[
                 "reasoning_struct_value_acc"
             ]
+        if answer_value_id is not None:
+            answer_value = self.answer_value_loss(pred_slots, answer_value_id)
+            result["loss"] = result["loss"] + answer_value_weight * answer_value["loss"]
+            result["answer_value_loss"] = answer_value["answer_value_loss"]
+            result["answer_value_acc"] = answer_value["answer_value_acc"]
         if self.use_reasoning_trace and trace_ids is not None:
             if trace_pred_slots is None:
                 trace_pred_slots = self.predict_trace_slots(problem_ids, math_ids)
@@ -759,6 +783,7 @@ class MathJEPAReadout(nn.Module):
         trace_struct_weight: float = 1.0,
         reasoning_struct_weight: float = 1.0,
         structured_answer_weight: float = 1.0,
+        answer_value_weight: float = 1.0,
         slot_diversity_weight: float = 0.1,
         batch_diversity_weight: float = 0.5,
     ) -> dict[str, torch.Tensor]:
@@ -776,6 +801,7 @@ class MathJEPAReadout(nn.Module):
             trace_struct_weight=trace_struct_weight,
             reasoning_struct_weight=reasoning_struct_weight,
             structured_answer_weight=structured_answer_weight,
+            answer_value_weight=answer_value_weight,
             contrastive_weight=contrastive_weight,
             vicreg_weight=vicreg_weight,
             slot_diversity_weight=slot_diversity_weight,
@@ -833,6 +859,8 @@ class MathJEPAReadout(nn.Module):
             "reasoning_struct_value_acc",
             "structured_answer_loss",
             "structured_answer_acc",
+            "answer_value_loss",
+            "answer_value_acc",
         ]:
             if key in pred_out:
                 result[key] = pred_out[key]
@@ -853,6 +881,7 @@ class MathJEPAReadout(nn.Module):
         trace_weight: float = 0.5,
         trace_struct_weight: float = 1.0,
         structured_answer_weight: float = 1.0,
+        answer_value_weight: float = 1.0,
     ):
         pred_out = self.stage1_predictor(
             problem_ids,
@@ -867,6 +896,7 @@ class MathJEPAReadout(nn.Module):
             trace_weight=trace_weight,
             trace_struct_weight=trace_struct_weight,
             structured_answer_weight=structured_answer_weight,
+            answer_value_weight=answer_value_weight,
         )
         dec_out = self.readout_loss(pred_out["pred_slots"], answer_ids, answer_len)
         total_loss = pred_out["loss"] + dec_out["loss"]
@@ -897,6 +927,8 @@ class MathJEPAReadout(nn.Module):
             "reasoning_struct_value_acc",
             "structured_answer_loss",
             "structured_answer_acc",
+            "answer_value_loss",
+            "answer_value_acc",
         ]:
             if key in pred_out:
                 result[key] = pred_out[key]
@@ -928,6 +960,14 @@ class MathJEPAReadout(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         trace_slots = self.predict_trace_slots(problem_ids, math_ids)
         logits = self.structured_answer_head(trace_slots.mean(dim=1))
+        return logits.argmax(dim=-1), logits.softmax(dim=-1).max(dim=-1).values
+
+    @torch.no_grad()
+    def predict_answer_value(
+        self, problem_ids: torch.Tensor, math_ids: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        slots = self.predict_answer_slots(problem_ids, math_ids)
+        logits = self.answer_value_head(slots.mean(dim=1))
         return logits.argmax(dim=-1), logits.softmax(dim=-1).max(dim=-1).values
 
     @torch.no_grad()

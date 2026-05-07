@@ -80,6 +80,37 @@ Longer expressions, such as `30+10+5-5`, are not passed through the two-step ope
 head as if they were a prefix. They are marked as `mode=parsed_expression` and handled
 by the deterministic parser fallback.
 
+## Latent Answer Diagnostics
+
+The direct latent readout path is currently much weaker than the operation path. Use:
+
+```bash
+bash scripts/eval_latent_answer_diagnostics.sh
+```
+
+Important modes:
+
+```text
+target     true answer latent -> decoder -> answer tokens
+pred       problem -> predicted answer latent -> decoder -> answer tokens
+latent_nn  predicted answer latent -> nearest true answer latent over numeric values
+```
+
+On the current checkpoint, `target` is high while `pred` and `latent_nn` are much
+lower. That means the decoder can read good answer latents, but the problem
+encoder/predictor is not reliably landing on the correct answer latent.
+
+There is also an optional numeric value head on predicted answer slots:
+
+```bash
+bash scripts/train_answer_value_head.sh
+CHECKPOINT=checkpoints/answer_value_head/best.pt MODES="answer_value" \
+  bash scripts/eval_latent_answer_diagnostics.sh
+```
+
+In the current experiment, that head also stays near the direct readout accuracy, which
+supports the same conclusion: predicted answer latents are the bottleneck.
+
 ## Smoke Train
 
 ```bash
