@@ -68,7 +68,11 @@ def _apply_op(lhs: int, op: str, rhs: int) -> int:
     raise ValueError(f"Unknown operator: {op}")
 
 
-def symbolic_candidate_texts(problem: str, base_prediction: str | None = None) -> list[str]:
+def symbolic_candidate_texts(
+    problem: str,
+    base_prediction: str | None = None,
+    include_oracle: bool = True,
+) -> list[str]:
     match = re.search(r"\d+[+\-*]\d+(?:[+\-*]\d+)?", problem)
     if match is None:
         return []
@@ -78,7 +82,8 @@ def symbolic_candidate_texts(problem: str, base_prediction: str | None = None) -
 
     if len(parts) == 3:
         a, op, b = parts
-        candidates.append(_apply_op(int(a), op, int(b)))
+        if include_oracle:
+            candidates.append(_apply_op(int(a), op, int(b)))
     elif len(parts) == 5:
         a_text, op1, b_text, op2, c_text = parts
         a = int(a_text)
@@ -94,7 +99,12 @@ def symbolic_candidate_texts(problem: str, base_prediction: str | None = None) -
         left_to_right = _apply_op(left_first, op2, c)
         right_first = _apply_op(b, op2, c)
         right_grouped = _apply_op(a, op1, right_first)
-        candidates.extend([precedence, left_to_right, first, left_first, right_first, right_grouped])
+        if include_oracle:
+            candidates.append(precedence)
+        variants = [left_to_right, first, left_first, right_first, right_grouped]
+        if not include_oracle:
+            variants = [value for value in variants if value != precedence]
+        candidates.extend(variants)
 
     if base_prediction is not None and re.fullmatch(r"-?\d+", base_prediction.strip()):
         base = int(base_prediction.strip())
@@ -133,6 +143,7 @@ def model_candidate_texts(
     device: torch.device,
     noise_scale: float,
     noise_candidates: int,
+    candidate_set: str = "symbolic_full",
 ) -> tuple[list[torch.Tensor], list[list[str]]]:
     problem_ids = batch["problem_ids"].to(device)
     math_ids = batch["math_ids"].to(device)
@@ -144,20 +155,24 @@ def model_candidate_texts(
     candidate_texts = [base_texts]
     max_answer_len = batch["answer_ids"].size(1)
 
-    symbolic_rows = [
-        symbolic_candidate_texts(problem, base_prediction=base)
-        for problem, base in zip(batch["problem"], base_texts)
-    ]
-    max_symbolic = max((len(row) for row in symbolic_rows), default=0)
-    for idx in range(max_symbolic):
-        texts = [
-            row[idx] if idx < len(row) else base
-            for row, base in zip(symbolic_rows, base_texts)
+    if candidate_set in {"symbolic_no_oracle", "symbolic_full"}:
+        include_oracle = candidate_set == "symbolic_full"
+        symbolic_rows = [
+            symbolic_candidate_texts(
+                problem, base_prediction=base, include_oracle=include_oracle
+            )
+            for problem, base in zip(batch["problem"], base_texts)
         ]
-        candidate_slots.append(
-            encode_answer_strings(model, tokenizer, texts, max_answer_len, device)
-        )
-        candidate_texts.append(texts)
+        max_symbolic = max((len(row) for row in symbolic_rows), default=0)
+        for idx in range(max_symbolic):
+            texts = [
+                row[idx] if idx < len(row) else base
+                for row, base in zip(symbolic_rows, base_texts)
+            ]
+            candidate_slots.append(
+                encode_answer_strings(model, tokenizer, texts, max_answer_len, device)
+            )
+            candidate_texts.append(texts)
 
     if model.use_reasoning_trace:
         _, reasoning_value_ids = model.predict_reasoning_struct(
@@ -207,6 +222,7 @@ def verifier_batch(
     batch: dict,
     device: torch.device,
     noise_scale: float,
+    candidate_set: str = "symbolic_full",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     problem_ids = batch["problem_ids"].to(device)
     answer_ids = batch["answer_ids"].to(device)
@@ -221,6 +237,7 @@ def verifier_batch(
         device,
         noise_scale=noise_scale,
         noise_candidates=1,
+        candidate_set=candidate_set,
     )
 
     contexts = [context, context]
@@ -250,6 +267,7 @@ def evaluate_verifier(
     device: torch.device,
     batch_size: int,
     noise_scale: float,
+    candidate_set: str = "symbolic_full",
 ) -> dict[str, float]:
     verifier.eval()
     loader = DataLoader(dataset, batch_size=batch_size)
@@ -259,7 +277,7 @@ def evaluate_verifier(
     neg_scores = []
     for batch in loader:
         contexts, candidates, labels = verifier_batch(
-            model, tokenizer, batch, device, noise_scale
+            model, tokenizer, batch, device, noise_scale, candidate_set=candidate_set
         )
         logits = verifier(contexts, candidates)
         preds = logits.sigmoid().ge(0.5).float()
@@ -286,6 +304,11 @@ def main() -> None:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--noise-scale", type=float, default=0.25)
+    parser.add_argument(
+        "--candidate-set",
+        choices=["neural", "symbolic_no_oracle", "symbolic_full"],
+        default="symbolic_full",
+    )
     parser.add_argument("--eval-every", type=int, default=100)
     parser.add_argument("--curriculum", choices=CURRICULA, default="mixed")
     args = parser.parse_args()
@@ -325,7 +348,12 @@ def main() -> None:
             verifier.train()
             optimizer.zero_grad(set_to_none=True)
             contexts, candidates, labels = verifier_batch(
-                model, tokenizer, batch, device, noise_scale=args.noise_scale
+                model,
+                tokenizer,
+                batch,
+                device,
+                noise_scale=args.noise_scale,
+                candidate_set=args.candidate_set,
             )
             logits = verifier(contexts, candidates)
             loss = F.binary_cross_entropy_with_logits(logits, labels)
@@ -343,6 +371,7 @@ def main() -> None:
                     device,
                     args.batch_size,
                     noise_scale=args.noise_scale,
+                    candidate_set=args.candidate_set,
                 )
                 print(
                     f"stage4_verifier step={step} loss={loss.item():.4f} "

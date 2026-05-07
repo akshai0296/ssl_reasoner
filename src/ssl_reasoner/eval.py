@@ -52,6 +52,11 @@ def main() -> None:
     parser.add_argument("--verifier-candidates", type=int, default=8)
     parser.add_argument("--verifier-noise-scale", type=float, default=0.15)
     parser.add_argument(
+        "--candidate-set",
+        choices=["neural", "symbolic_no_oracle", "symbolic_full"],
+        default="symbolic_full",
+    )
+    parser.add_argument(
         "--curriculum",
         choices=CURRICULA,
         default="mixed",
@@ -180,6 +185,7 @@ def main() -> None:
                     device,
                     noise_scale=args.verifier_noise_scale,
                     noise_candidates=max(args.verifier_candidates - 8, 0),
+                    candidate_set=args.candidate_set,
                 )
                 stacked = torch.stack(candidates, dim=1)
                 flat_slots = stacked.flatten(0, 1)

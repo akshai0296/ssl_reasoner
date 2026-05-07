@@ -149,6 +149,13 @@ def test_symbolic_candidate_texts_include_left_to_right_for_mixed():
     assert "12" in candidates
 
 
+def test_symbolic_candidate_texts_can_exclude_oracle_precedence_result():
+    candidates = symbolic_candidate_texts("What is 2+3*4?", include_oracle=False)
+    assert "14" not in candidates
+    assert "20" in candidates
+    assert "12" in candidates
+
+
 def test_structured_trace_fields_respect_precedence():
     op_ids, values, mask = make_trace_fields("20+1*0")
     assert op_ids == [3, 1]
