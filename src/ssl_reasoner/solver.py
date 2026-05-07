@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 import torch
 
@@ -18,6 +19,20 @@ class MathSolveResult:
     operation_answer: str | None
     readout_answer: str
     operation_ids: list[int]
+    operation_confidences: list[float]
+    min_operation_confidence: float
+
+
+def operation_confidence_count(problem: str) -> int:
+    match = re.search(r"\d+[+\-*]\d+(?:[+\-*]\d+)?", problem)
+    if match is None:
+        return 0
+    parts = re.split(r"([+\-*])", match.group(0))
+    if len(parts) == 3:
+        return 1
+    if len(parts) == 5:
+        return 2
+    return 0
 
 
 def _device(name: str) -> torch.device:
@@ -61,6 +76,22 @@ def load_math_solver(
 
 
 @torch.no_grad()
+def predict_trace_operation_ids(
+    model: MathJEPAReadout,
+    problem_ids: torch.Tensor,
+    math_ids: torch.Tensor,
+) -> tuple[list[list[int]], list[list[float]]]:
+    if not model.use_reasoning_trace:
+        empty = [[] for _ in range(problem_ids.size(0))]
+        return empty, empty
+    slots = model.predict_trace_slots(problem_ids, math_ids)
+    pred = model.trace_struct_head(slots.mean(dim=1))
+    op_probs = pred[:, :8].view(-1, 2, 4).softmax(dim=-1)
+    confidences, op_ids = op_probs.max(dim=-1)
+    return op_ids.detach().cpu().tolist(), confidences.detach().cpu().tolist()
+
+
+@torch.no_grad()
 def solve_problem_texts(
     model: MathJEPAReadout,
     tokenizer: CharTokenizer,
@@ -69,6 +100,7 @@ def solve_problem_texts(
     max_problem_len: int,
     max_math_len: int,
     batch_size: int = 64,
+    operation_confidence_threshold: float = 0.0,
 ) -> list[MathSolveResult]:
     results: list[MathSolveResult] = []
     for start in range(0, len(problems), batch_size):
@@ -86,17 +118,19 @@ def solve_problem_texts(
         decoded = model.solve_ids(problem_ids, pad_id=tokenizer.pad_id, math_ids=math_ids)
         readout_answers = [tokenizer.decode(ids).strip() for ids in decoded]
 
-        if model.use_reasoning_trace:
-            op_ids, _ = model.predict_structured_trace(problem_ids, math_ids=math_ids)
-            op_rows = op_ids.detach().cpu().tolist()
-        else:
-            op_rows = [[] for _ in batch_problems]
+        op_rows, confidence_rows = predict_trace_operation_ids(model, problem_ids, math_ids)
 
-        for problem, op_row, readout_answer in zip(
-            batch_problems, op_rows, readout_answers
+        for problem, op_row, confidence_row, readout_answer in zip(
+            batch_problems, op_rows, confidence_rows, readout_answers
         ):
             operation_answer = operation_candidate_text(problem, op_row)
-            if operation_answer is None:
+            confidence_count = operation_confidence_count(problem)
+            used_confidences = confidence_row[:confidence_count]
+            min_confidence = min(used_confidences, default=0.0)
+            if (
+                operation_answer is None
+                or min_confidence < operation_confidence_threshold
+            ):
                 answer = readout_answer
                 mode = "readout"
             else:
@@ -110,6 +144,8 @@ def solve_problem_texts(
                     operation_answer=operation_answer,
                     readout_answer=readout_answer,
                     operation_ids=[int(idx) for idx in op_row],
+                    operation_confidences=[float(conf) for conf in confidence_row],
+                    min_operation_confidence=float(min_confidence),
                 )
             )
     return results

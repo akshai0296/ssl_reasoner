@@ -7,4 +7,5 @@ PYTHONPATH=src python -m ssl_reasoner.eval \
   --samples "${SAMPLES:-500}" \
   --batch-size "${BATCH_SIZE:-64}" \
   --curriculum "${CURRICULUM:-mixed}" \
+  --operation-confidence-threshold "${OPERATION_CONFIDENCE_THRESHOLD:-0.0}" \
   --dump-errors "${DUMP_ERRORS:-0}"

@@ -180,6 +180,18 @@ def test_solve_problem_texts_uses_operation_then_readout_fallback():
         def predict_structured_trace(self, problem_ids, math_ids=None):
             return torch.tensor([[3, 1], [1, 0]]), None
 
+        def predict_trace_slots(self, problem_ids, math_ids=None):
+            return torch.zeros(problem_ids.size(0), 8, 128)
+
+        def trace_struct_head(self, pooled):
+            logits = torch.full((pooled.size(0), 8 + 6 * 1401), -10.0)
+            logits[0, 3] = 10.0
+            logits[0, 4 + 1] = 10.0
+            if pooled.size(0) > 1:
+                logits[1, 1] = 10.0
+                logits[1, 4] = 10.0
+            return logits
+
     results = solve_problem_texts(
         FakeModel(),
         tokenizer,
@@ -191,9 +203,22 @@ def test_solve_problem_texts_uses_operation_then_readout_fallback():
 
     assert results[0].answer == "14"
     assert results[0].mode == "operation"
+    assert results[0].min_operation_confidence > 0.99
     assert results[0].readout_answer == "999"
     assert results[1].answer == "42"
     assert results[1].mode == "readout"
+
+    gated_results = solve_problem_texts(
+        FakeModel(),
+        tokenizer,
+        ["What is 2+3*4?"],
+        torch.device("cpu"),
+        max_problem_len=64,
+        max_math_len=8,
+        operation_confidence_threshold=1.1,
+    )
+    assert gated_results[0].answer == "999"
+    assert gated_results[0].mode == "readout"
 
 
 def test_structured_trace_fields_respect_precedence():

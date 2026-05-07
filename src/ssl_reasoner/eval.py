@@ -13,6 +13,7 @@ from .data import (
     generate_math_examples,
 )
 from .model import LatentVerifier, MathJEPAReadout
+from .solver import operation_confidence_count, predict_trace_operation_ids
 from .tokenizer import build_math_tokenizer
 from .verifier import model_candidate_texts, operation_candidate_text
 
@@ -35,6 +36,7 @@ def main() -> None:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--dump-errors", type=int, default=0)
+    parser.add_argument("--operation-confidence-threshold", type=float, default=0.0)
     parser.add_argument(
         "--mode",
         choices=[
@@ -147,11 +149,16 @@ def main() -> None:
                 math_ids = batch["math_ids"].to(device)
                 if args.mode == "reasoning_ops":
                     pred_ops, _ = model.predict_reasoning_struct(problem_ids, math_ids=math_ids)
+                    op_rows = pred_ops.detach().cpu().tolist()
+                    confidence_rows = [[1.0, 1.0] for _ in op_rows]
                 elif args.mode == "trace_ops":
-                    pred_ops, _ = model.predict_structured_trace(problem_ids, math_ids=math_ids)
+                    op_rows, confidence_rows = predict_trace_operation_ids(
+                        model, problem_ids, math_ids
+                    )
                 else:
-                    pred_ops, _ = model.predict_structured_trace(problem_ids, math_ids=math_ids)
-                op_rows = pred_ops.detach().cpu().tolist()
+                    op_rows, confidence_rows = predict_trace_operation_ids(
+                        model, problem_ids, math_ids
+                    )
                 op_predictions = [
                     operation_candidate_text(problem, op_row)
                     for problem, op_row in zip(batch["problem"], op_rows)
@@ -164,19 +171,37 @@ def main() -> None:
                     )
                     readout_predictions = [tokenizer.decode(ids).strip() for ids in decoded]
                     predictions = [
-                        op_pred if op_pred is not None else readout
-                        for op_pred, readout in zip(op_predictions, readout_predictions)
+                        op_pred
+                        if (
+                            op_pred is not None
+                            and (
+                                args.mode == "operation_solver"
+                                or min(
+                                    conf_row[: operation_confidence_count(problem)],
+                                    default=0.0,
+                                )
+                                >= args.operation_confidence_threshold
+                            )
+                        )
+                        else readout
+                        for problem, op_pred, conf_row, readout in zip(
+                            batch["problem"],
+                            op_predictions,
+                            confidence_rows,
+                            readout_predictions,
+                        )
                     ]
                 else:
                     predictions = [op_pred or "" for op_pred in op_predictions]
                 references = batch["answer"]
-                for problem, pred, answer, op_label, split_label, op_row in zip(
+                for problem, pred, answer, op_label, split_label, op_row, conf_row in zip(
                     batch["problem"],
                     predictions,
                     references,
                     batch["op_label"],
                     batch["split_label"],
                     op_rows,
+                    confidence_rows,
                 ):
                     is_correct = pred == answer
                     correct += is_correct
@@ -199,7 +224,7 @@ def main() -> None:
                         shown += 1
                     if not is_correct and errors_shown < args.dump_errors:
                         print(
-                            f"err: pattern={pattern} ops={op_row} "
+                            f"err: pattern={pattern} ops={op_row} op_conf={conf_row} "
                             f"{problem} -> pred={pred!r} target={answer!r}"
                         )
                         errors_shown += 1
