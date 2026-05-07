@@ -1,0 +1,31 @@
+{
+  "current_best": {
+    "name": "trace_ops_head_mixed",
+    "checkpoint": "checkpoints/trace_ops_head_mixed/best.pt",
+    "base_checkpoint": "checkpoints/predictor_reasoning_stage1_mixed_anticollapse/best.pt",
+    "created_from_commit": "e5c42686789d28f57899fbca4f1a0d7a59c25f1e",
+    "status": "local_checkpoint_ignored_by_git",
+    "reproduce_command": "bash scripts/reproduce_trace_ops_head.sh",
+    "train_command": "bash scripts/finetune_trace_ops_head.sh",
+    "default_solver_command": "bash scripts/solve_math.sh 'What is 2+3*4?'",
+    "notes": "Head-only fine-tune of trace_struct_head on mixed_only. Checkpoint is intentionally not tracked in git; use the reproduce script to rebuild it locally."
+  },
+  "eval_results": {
+    "mixed": {
+      "samples": 500,
+      "accuracy": 1.0
+    },
+    "mixed_only": {
+      "samples": 500,
+      "accuracy": 0.99
+    },
+    "seen_mixed": {
+      "samples": 500,
+      "accuracy": 1.0
+    },
+    "unseen_mixed": {
+      "samples": 500,
+      "accuracy": 0.998
+    }
+  }
+}
