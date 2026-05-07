@@ -12,6 +12,7 @@ from ssl_reasoner.data import (
 from ssl_reasoner.diagnostics import latent_health
 from ssl_reasoner.model import LatentVerifier, MathJEPAReadout
 from ssl_reasoner.tokenizer import build_math_tokenizer
+from ssl_reasoner.verifier import symbolic_candidate_texts
 
 
 def test_forward_shapes():
@@ -131,6 +132,21 @@ def test_compositional_train_mixes_seen_single_and_seen_mixed():
 def test_trace_respects_multiplication_precedence():
     assert make_trace("20+1*0") == "1*0=0 20+0=20"
     assert make_trace("30+41+12") == "30+41=71 71+12=83"
+
+
+def test_symbolic_candidate_texts_include_precedence_and_variants():
+    candidates = symbolic_candidate_texts("Find the value of 20+1*0.", base_prediction="19")
+    assert candidates[0] == "20"
+    assert "0" in candidates
+    assert "18" in candidates
+    assert "20" in candidates
+
+
+def test_symbolic_candidate_texts_include_left_to_right_for_mixed():
+    candidates = symbolic_candidate_texts("What is 2+3*4?")
+    assert "14" in candidates
+    assert "20" in candidates
+    assert "12" in candidates
 
 
 def test_structured_trace_fields_respect_precedence():

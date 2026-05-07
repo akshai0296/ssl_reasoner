@@ -179,7 +179,7 @@ def main() -> None:
                     batch,
                     device,
                     noise_scale=args.verifier_noise_scale,
-                    noise_candidates=max(args.verifier_candidates - 3, 0),
+                    noise_candidates=max(args.verifier_candidates - 8, 0),
                 )
                 stacked = torch.stack(candidates, dim=1)
                 flat_slots = stacked.flatten(0, 1)

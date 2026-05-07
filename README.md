@@ -75,6 +75,10 @@ Evaluate verifier-ranked latent candidates with:
 scripts/eval_stage4_verifier.sh
 ```
 
+Verifier evaluation includes symbolic math candidates: parsed precedence result,
+left-to-right result, intermediate operation values, and small variants around the readout
+answer.
+
 ## Evaluate a Checkpoint
 
 ```bash

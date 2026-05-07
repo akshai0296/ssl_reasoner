@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import torch
@@ -57,6 +58,57 @@ def load_reasoner(checkpoint_path: str, device: torch.device) -> tuple[MathJEPAR
     return model, args
 
 
+def _apply_op(lhs: int, op: str, rhs: int) -> int:
+    if op == "+":
+        return lhs + rhs
+    if op == "-":
+        return lhs - rhs
+    if op == "*":
+        return lhs * rhs
+    raise ValueError(f"Unknown operator: {op}")
+
+
+def symbolic_candidate_texts(problem: str, base_prediction: str | None = None) -> list[str]:
+    match = re.search(r"\d+[+\-*]\d+(?:[+\-*]\d+)?", problem)
+    if match is None:
+        return []
+    expr = match.group(0)
+    parts = re.split(r"([+\-*])", expr)
+    candidates: list[int] = []
+
+    if len(parts) == 3:
+        a, op, b = parts
+        candidates.append(_apply_op(int(a), op, int(b)))
+    elif len(parts) == 5:
+        a_text, op1, b_text, op2, c_text = parts
+        a = int(a_text)
+        b = int(b_text)
+        c = int(c_text)
+        if op2 == "*":
+            first = _apply_op(b, op2, c)
+            precedence = _apply_op(a, op1, first)
+        else:
+            first = _apply_op(a, op1, b)
+            precedence = _apply_op(first, op2, c)
+        left_first = _apply_op(a, op1, b)
+        left_to_right = _apply_op(left_first, op2, c)
+        right_first = _apply_op(b, op2, c)
+        right_grouped = _apply_op(a, op1, right_first)
+        candidates.extend([precedence, left_to_right, first, left_first, right_first, right_grouped])
+
+    if base_prediction is not None and re.fullmatch(r"-?\d+", base_prediction.strip()):
+        base = int(base_prediction.strip())
+        candidates.extend([base - 1, base + 1])
+
+    deduped = []
+    seen = set()
+    for value in candidates:
+        if value not in seen:
+            seen.add(value)
+            deduped.append(str(value))
+    return deduped
+
+
 @torch.no_grad()
 def encode_answer_strings(
     model: MathJEPAReadout,
@@ -91,6 +143,21 @@ def model_candidate_texts(
     candidate_slots = [base_slots]
     candidate_texts = [base_texts]
     max_answer_len = batch["answer_ids"].size(1)
+
+    symbolic_rows = [
+        symbolic_candidate_texts(problem, base_prediction=base)
+        for problem, base in zip(batch["problem"], base_texts)
+    ]
+    max_symbolic = max((len(row) for row in symbolic_rows), default=0)
+    for idx in range(max_symbolic):
+        texts = [
+            row[idx] if idx < len(row) else base
+            for row, base in zip(symbolic_rows, base_texts)
+        ]
+        candidate_slots.append(
+            encode_answer_strings(model, tokenizer, texts, max_answer_len, device)
+        )
+        candidate_texts.append(texts)
 
     if model.use_reasoning_trace:
         _, reasoning_value_ids = model.predict_reasoning_struct(

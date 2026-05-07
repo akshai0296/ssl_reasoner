@@ -2,10 +2,10 @@
 set -euo pipefail
 
 PYTHONPATH=src python -m ssl_reasoner.eval \
-  --checkpoint checkpoints/stage3_joint_low_lr/best.pt \
-  --verifier-checkpoint checkpoints/verifier_v1.pt \
+  --checkpoint "${CHECKPOINT:-checkpoints/predictor_reasoning_stage1_mixed_anticollapse/best.pt}" \
+  --verifier-checkpoint "${VERIFIER:-checkpoints/verifier_reasoning_stage1_mixed_heavy.pt}" \
   --mode verifier \
-  --verifier-candidates 4 \
+  --verifier-candidates 8 \
   --verifier-noise-scale 0.05 \
   --samples "${SAMPLES:-500}" \
   --batch-size "${BATCH_SIZE:-64}" \
