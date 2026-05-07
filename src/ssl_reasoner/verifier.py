@@ -100,7 +100,7 @@ def operation_candidate_text(
     second_op = ops[1] if len(ops) > 1 and ops[1] != "none" else op2
 
     try:
-        if first_op == op2:
+        if op2 == "*" and first_op == op2:
             first_value = _apply_op(b, first_op, c)
             return str(_apply_op(a, second_op, first_value))
         first_value = _apply_op(a, first_op, b)

@@ -34,6 +34,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--dump-errors", type=int, default=0)
     parser.add_argument(
         "--mode",
         choices=[
@@ -114,6 +115,7 @@ def main() -> None:
     by_split: dict[str, list[int]] = {}
     by_pattern: dict[str, list[int]] = {}
     shown = 0
+    errors_shown = 0
     with torch.no_grad():
         for batch in loader:
             if args.mode == "trace_struct":
@@ -143,9 +145,10 @@ def main() -> None:
                     pred_ops, _ = model.predict_structured_trace(problem_ids, math_ids=math_ids)
                 else:
                     pred_ops, _ = model.predict_structured_trace(problem_ids, math_ids=math_ids)
+                op_rows = pred_ops.detach().cpu().tolist()
                 op_predictions = [
                     operation_candidate_text(problem, op_row)
-                    for problem, op_row in zip(batch["problem"], pred_ops.detach().cpu().tolist())
+                    for problem, op_row in zip(batch["problem"], op_rows)
                 ]
                 if args.mode == "operation_solver":
                     decoded = model.solve_ids(
@@ -161,12 +164,13 @@ def main() -> None:
                 else:
                     predictions = [op_pred or "" for op_pred in op_predictions]
                 references = batch["answer"]
-                for problem, pred, answer, op_label, split_label in zip(
+                for problem, pred, answer, op_label, split_label, op_row in zip(
                     batch["problem"],
                     predictions,
                     references,
                     batch["op_label"],
                     batch["split_label"],
+                    op_rows,
                 ):
                     is_correct = pred == answer
                     correct += is_correct
@@ -187,6 +191,12 @@ def main() -> None:
                         mark = "ok" if is_correct else "bad"
                         print(f"{mark}: {problem} -> pred={pred!r} target={answer!r}")
                         shown += 1
+                    if not is_correct and errors_shown < args.dump_errors:
+                        print(
+                            f"err: pattern={pattern} ops={op_row} "
+                            f"{problem} -> pred={pred!r} target={answer!r}"
+                        )
+                        errors_shown += 1
                 continue
             if args.mode in {"structured_answer", "fallback"}:
                 pred_ids, confidence = model.predict_structured_answer(

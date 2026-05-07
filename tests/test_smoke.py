@@ -160,6 +160,8 @@ def test_operation_candidate_text_executes_predicted_operation_order():
     assert operation_candidate_text("What is 2+3*4?", [3, 1]) == "14"
     assert operation_candidate_text("What is 2+3*4?", [1, 3]) == "20"
     assert operation_candidate_text("Calculate 9-4.", [2, 0]) == "5"
+    assert operation_candidate_text("Calculate 9-4-2.", [2, 2]) == "3"
+    assert operation_candidate_text("Calculate 9-4+2.", [2, 1]) == "7"
 
 
 def test_structured_trace_fields_respect_precedence():
