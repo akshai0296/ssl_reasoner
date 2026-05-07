@@ -163,6 +163,7 @@ def test_operation_candidate_text_executes_predicted_operation_order():
     assert operation_candidate_text("Calculate 9-4.", [2, 0]) == "5"
     assert operation_candidate_text("Calculate 9-4-2.", [2, 2]) == "3"
     assert operation_candidate_text("Calculate 9-4+2.", [2, 1]) == "7"
+    assert operation_candidate_text("Find 30+10+5-5.", [1, 1]) is None
 
 
 def test_solve_problem_texts_uses_operation_then_readout_fallback():
@@ -219,6 +220,19 @@ def test_solve_problem_texts_uses_operation_then_readout_fallback():
     )
     assert gated_results[0].answer == "999"
     assert gated_results[0].mode == "readout"
+
+    parsed_results = solve_problem_texts(
+        FakeModel(),
+        tokenizer,
+        ["Find 30+10+5-5."],
+        torch.device("cpu"),
+        max_problem_len=64,
+        max_math_len=8,
+    )
+    assert parsed_results[0].answer == "40"
+    assert parsed_results[0].mode == "parsed_expression"
+    assert parsed_results[0].operation_answer is None
+    assert parsed_results[0].parsed_expression_answer == "40"
 
 
 def test_structured_trace_fields_respect_precedence():

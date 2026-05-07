@@ -19,6 +19,7 @@ from .model import LatentVerifier, MathJEPAReadout
 from .tokenizer import build_math_tokenizer
 
 TRACE_ID_TO_OP = {0: "none", 1: "+", 2: "-", 3: "*"}
+EXPRESSION_RE = re.compile(r"\d+(?:[+\-*]\d+)+")
 
 
 def _device(name: str) -> torch.device:
@@ -70,14 +71,20 @@ def _apply_op(lhs: int, op: str, rhs: int) -> int:
     raise ValueError(f"Unknown operator: {op}")
 
 
+def extract_expression(problem: str) -> str | None:
+    match = EXPRESSION_RE.search(problem)
+    if match is None:
+        return None
+    return match.group(0)
+
+
 def operation_candidate_text(
     problem: str,
     op_ids: list[int],
 ) -> str | None:
-    match = re.search(r"\d+[+\-*]\d+(?:[+\-*]\d+)?", problem)
-    if match is None:
+    expr = extract_expression(problem)
+    if expr is None:
         return None
-    expr = match.group(0)
     parts = re.split(r"([+\-*])", expr)
     ops = [TRACE_ID_TO_OP.get(int(idx), "none") for idx in op_ids]
 
@@ -114,10 +121,9 @@ def symbolic_candidate_texts(
     base_prediction: str | None = None,
     include_oracle: bool = True,
 ) -> list[str]:
-    match = re.search(r"\d+[+\-*]\d+(?:[+\-*]\d+)?", problem)
-    if match is None:
+    expr = extract_expression(problem)
+    if expr is None:
         return []
-    expr = match.group(0)
     parts = re.split(r"([+\-*])", expr)
     candidates: list[int] = []
 

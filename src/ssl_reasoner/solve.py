@@ -44,7 +44,9 @@ def main() -> None:
                 f"{result.answer}\tmode={result.mode} ops={result.operation_ids} "
                 f"op_conf={result.operation_confidences} "
                 f"min_op_conf={result.min_operation_confidence:.3f} "
-                f"op_answer={result.operation_answer!r} readout={result.readout_answer!r} "
+                f"op_answer={result.operation_answer!r} "
+                f"parsed_answer={result.parsed_expression_answer!r} "
+                f"readout={result.readout_answer!r} "
                 f"problem={result.problem!r}"
             )
         else:

@@ -8,7 +8,7 @@ import torch
 from .data import MATH_FEATURE_VOCAB_SIZE, encode_math_features
 from .model import MathJEPAReadout
 from .tokenizer import CharTokenizer, build_math_tokenizer
-from .verifier import operation_candidate_text
+from .verifier import extract_expression, operation_candidate_text
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,7 @@ class MathSolveResult:
     answer: str
     mode: str
     operation_answer: str | None
+    parsed_expression_answer: str | None
     readout_answer: str
     operation_ids: list[int]
     operation_confidences: list[float]
@@ -24,15 +25,46 @@ class MathSolveResult:
 
 
 def operation_confidence_count(problem: str) -> int:
-    match = re.search(r"\d+[+\-*]\d+(?:[+\-*]\d+)?", problem)
-    if match is None:
+    expr = extract_expression(problem)
+    if expr is None:
         return 0
-    parts = re.split(r"([+\-*])", match.group(0))
+    parts = re.split(r"([+\-*])", expr)
     if len(parts) == 3:
         return 1
     if len(parts) == 5:
         return 2
     return 0
+
+
+def parsed_expression_answer(problem: str) -> str | None:
+    expr = extract_expression(problem)
+    if expr is None:
+        return None
+    parts = re.split(r"([+\-*])", expr)
+    if len(parts) < 3 or len(parts) % 2 == 0:
+        return None
+
+    values = [int(parts[idx]) for idx in range(0, len(parts), 2)]
+    ops = [parts[idx] for idx in range(1, len(parts), 2)]
+
+    collapsed_values = [values[0]]
+    collapsed_ops: list[str] = []
+    for op, value in zip(ops, values[1:]):
+        if op == "*":
+            collapsed_values[-1] *= value
+        else:
+            collapsed_ops.append(op)
+            collapsed_values.append(value)
+
+    total = collapsed_values[0]
+    for op, value in zip(collapsed_ops, collapsed_values[1:]):
+        if op == "+":
+            total += value
+        elif op == "-":
+            total -= value
+        else:
+            return None
+    return str(total)
 
 
 def _device(name: str) -> torch.device:
@@ -124,6 +156,11 @@ def solve_problem_texts(
             batch_problems, op_rows, confidence_rows, readout_answers
         ):
             operation_answer = operation_candidate_text(problem, op_row)
+            parsed_answer = (
+                parsed_expression_answer(problem)
+                if operation_answer is None
+                else None
+            )
             confidence_count = operation_confidence_count(problem)
             used_confidences = confidence_row[:confidence_count]
             min_confidence = min(used_confidences, default=0.0)
@@ -131,8 +168,12 @@ def solve_problem_texts(
                 operation_answer is None
                 or min_confidence < operation_confidence_threshold
             ):
-                answer = readout_answer
-                mode = "readout"
+                if parsed_answer is not None:
+                    answer = parsed_answer
+                    mode = "parsed_expression"
+                else:
+                    answer = readout_answer
+                    mode = "readout"
             else:
                 answer = operation_answer
                 mode = "operation"
@@ -142,6 +183,7 @@ def solve_problem_texts(
                     answer=answer,
                     mode=mode,
                     operation_answer=operation_answer,
+                    parsed_expression_answer=parsed_answer,
                     readout_answer=readout_answer,
                     operation_ids=[int(idx) for idx in op_row],
                     operation_confidences=[float(conf) for conf in confidence_row],

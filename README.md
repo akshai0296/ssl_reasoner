@@ -75,6 +75,11 @@ You can inspect:
 answer, mode, predicted operation ids, operation confidences, operation answer, readout answer
 ```
 
+The learned operation head is trained for one-step and two-step arithmetic expressions.
+Longer expressions, such as `30+10+5-5`, are not passed through the two-step operation
+head as if they were a prefix. They are marked as `mode=parsed_expression` and handled
+by the deterministic parser fallback.
+
 ## Smoke Train
 
 ```bash
