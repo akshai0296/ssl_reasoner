@@ -92,6 +92,18 @@ checkpoints/trace_ops_head_mixed/best.pt
 That checkpoint is local and ignored by git. The repo tracks the commands and manifest
 needed to reproduce it, not the 28 MB weight file.
 
+Download the current best checkpoint from the GitHub Release:
+
+```bash
+bash scripts/download_current_best.sh
+```
+
+Release page:
+
+```text
+https://github.com/akshai0296/ssl_reasoner/releases/tag/math-solver-v0.1.0
+```
+
 Solve examples with:
 
 ```bash
