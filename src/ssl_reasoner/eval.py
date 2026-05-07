@@ -15,7 +15,12 @@ from .data import (
     generate_math_examples,
 )
 from .model import LatentVerifier, MathJEPAReadout
-from .solver import operation_confidence_count, predict_trace_operation_ids
+from .solver import (
+    operation_confidence_count,
+    predict_trace_operation_ids,
+    predict_trace_state_answers,
+    predict_trace_state_regression_answers,
+)
 from .tokenizer import build_math_tokenizer
 from .verifier import model_candidate_texts, operation_candidate_text
 
@@ -51,6 +56,8 @@ def main() -> None:
             "latent_nn",
             "reasoning_ops",
             "trace_ops",
+            "trace_state_solver",
+            "trace_state_regression",
             "operation_solver",
             "operation_fallback",
             "fallback",
@@ -163,6 +170,8 @@ def main() -> None:
             if args.mode in {
                 "reasoning_ops",
                 "trace_ops",
+                "trace_state_solver",
+                "trace_state_regression",
                 "operation_solver",
                 "operation_fallback",
             }:
@@ -184,7 +193,25 @@ def main() -> None:
                     operation_candidate_text(problem, op_row)
                     for problem, op_row in zip(batch["problem"], op_rows)
                 ]
-                if args.mode in {"operation_solver", "operation_fallback"}:
+                if args.mode == "trace_state_solver":
+                    state_predictions, state_confidences = predict_trace_state_answers(
+                        model,
+                        problem_ids,
+                        math_ids,
+                        list(batch["problem"]),
+                    )
+                    predictions = [pred or "" for pred in state_predictions]
+                elif args.mode == "trace_state_regression":
+                    state_predictions, state_confidences = (
+                        predict_trace_state_regression_answers(
+                            model,
+                            problem_ids,
+                            math_ids,
+                            list(batch["problem"]),
+                        )
+                    )
+                    predictions = [pred or "" for pred in state_predictions]
+                elif args.mode in {"operation_solver", "operation_fallback"}:
                     decoded = model.solve_ids(
                         problem_ids,
                         pad_id=tokenizer.pad_id,

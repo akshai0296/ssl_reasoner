@@ -177,6 +177,28 @@ def evaluate_answer_value(model, dataset, device, batch_size: int) -> float:
 
 
 @torch.no_grad()
+def evaluate_trace_state_final(model, dataset, device, batch_size: int) -> float:
+    if not model.use_reasoning_trace:
+        return 0.0
+    model.eval()
+    loader = DataLoader(dataset, batch_size=batch_size)
+    correct = 0
+    total = 0
+    for batch in loader:
+        pred = model.predict_trace_state_values(
+            batch["problem_ids"].to(device),
+            math_ids=batch["math_ids"].to(device),
+        ).round()
+        values = batch["trace_state_values"].to(device)
+        mask = batch["trace_state_mask"].to(device)
+        final_target = torch.where(mask[:, 1].bool(), values[:, 1], values[:, 0])
+        final_pred = torch.where(mask[:, 1].bool(), pred[:, 1], pred[:, 0])
+        correct += int((final_pred == final_target).sum().item())
+        total += int(final_target.numel())
+    return correct / max(total, 1)
+
+
+@torch.no_grad()
 def format_samples(
     model,
     dataset,
@@ -260,6 +282,8 @@ def run_stage(
             trace_op_ids = batch["trace_op_ids"].to(device)
             trace_value_ids = batch["trace_value_ids"].to(device)
             trace_value_mask = batch["trace_value_mask"].to(device)
+            trace_state_values = batch["trace_state_values"].to(device)
+            trace_state_mask = batch["trace_state_mask"].to(device)
             answer_value_id = batch["answer_value_id"].to(device)
 
             if name == "stage0_target_warmup":
@@ -280,6 +304,8 @@ def run_stage(
                     trace_op_ids=trace_op_ids,
                     trace_value_ids=trace_value_ids,
                     trace_value_mask=trace_value_mask,
+                    trace_state_values=trace_state_values,
+                    trace_state_mask=trace_state_mask,
                     answer_value_id=answer_value_id,
                     trace_weight=args.trace_weight,
                     trace_struct_weight=args.trace_struct_weight,
@@ -314,6 +340,8 @@ def run_stage(
                     trace_op_ids=trace_op_ids,
                     trace_value_ids=trace_value_ids,
                     trace_value_mask=trace_value_mask,
+                    trace_state_values=trace_state_values,
+                    trace_state_mask=trace_state_mask,
                     answer_value_id=answer_value_id,
                     pred_weight=args.joint_pred_weight,
                     contrastive_weight=args.joint_contrastive_weight,
@@ -346,6 +374,28 @@ def run_stage(
                     trace_op_ids,
                     trace_value_ids,
                     trace_value_mask,
+                )
+                if args.trace_state_weight > 0:
+                    state_out = model.trace_state_regression_loss(
+                        slots,
+                        trace_state_values,
+                        trace_state_mask,
+                    )
+                    out["loss"] = out["loss"] + args.trace_state_weight * state_out["loss"]
+                    out["trace_state_regression_loss"] = state_out[
+                        "trace_state_regression_loss"
+                    ]
+                    out["trace_state_regression_acc"] = state_out[
+                        "trace_state_regression_acc"
+                    ]
+                    out["trace_state_final_acc"] = state_out["trace_state_final_acc"]
+            elif name == "trace_state_head":
+                with torch.no_grad():
+                    slots = model.predict_trace_slots(problem_ids, math_ids)
+                out = model.trace_state_regression_loss(
+                    slots,
+                    trace_state_values,
+                    trace_state_mask,
                 )
             elif name == "answer_value_head":
                 with torch.no_grad():
@@ -380,6 +430,9 @@ def run_stage(
                 answer_value_acc = evaluate_answer_value(
                     model, val_dataset, device, batch_size
                 )
+                trace_state_final_acc = evaluate_trace_state_final(
+                    model, val_dataset, device, batch_size
+                )
                 metrics = " ".join(
                     f"{key}={value.item():.4f}"
                     for key, value in out.items()
@@ -390,6 +443,8 @@ def run_stage(
                         "reasoning_struct_op_acc",
                         "reasoning_struct_value_acc",
                         "structured_answer_acc",
+                        "trace_state_regression_acc",
+                        "trace_state_final_acc",
                         "answer_value_acc",
                     }
                 )
@@ -400,7 +455,8 @@ def run_stage(
                     f"trace_struct_op_acc={trace_struct['trace_struct_op_acc']:.3f} "
                     f"trace_struct_value_acc={trace_struct['trace_struct_value_acc']:.3f} "
                     f"structured_answer_acc={structured_answer_acc:.3f} "
-                    f"answer_value_acc={answer_value_acc:.3f}"
+                    f"answer_value_acc={answer_value_acc:.3f} "
+                    f"trace_state_final_acc={trace_state_final_acc:.3f}"
                 )
                 op_metrics = " ".join(
                     f"{key}={value:.3f}"
@@ -420,6 +476,7 @@ def run_stage(
                     "stage3_joint",
                     "reasoning_head",
                     "trace_ops_head",
+                    "trace_state_head",
                     "answer_value_head",
                 }:
                     diag = latent_health(model, val_dataset, device, batch_size)
@@ -515,6 +572,7 @@ def main() -> None:
     parser.add_argument("--target-readout-weight", type=float, default=1.0)
     parser.add_argument("--trace-weight", type=float, default=0.5)
     parser.add_argument("--trace-struct-weight", type=float, default=1.0)
+    parser.add_argument("--trace-state-weight", type=float, default=0.0)
     parser.add_argument("--reasoning-struct-weight", type=float, default=0.1)
     parser.add_argument("--structured-answer-weight", type=float, default=1.0)
     parser.add_argument("--answer-value-weight", type=float, default=1.0)
@@ -697,9 +755,11 @@ def main() -> None:
             _set_trainable(model.trace_predictor, True)
             _set_trainable(model.trace_struct_head, True)
             _set_trainable(model.structured_answer_head, True)
+            _set_trainable(model.trace_state_regression_head, True)
             stage1_params += list(model.trace_predictor.parameters())
             stage1_params += list(model.trace_struct_head.parameters())
             stage1_params += list(model.structured_answer_head.parameters())
+            stage1_params += list(model.trace_state_regression_head.parameters())
             if args.use_trace_fusion:
                 _set_trainable(model.trace_struct_summary, True)
                 _set_trainable(model.trace_fusion, True)
@@ -784,10 +844,12 @@ def main() -> None:
             _set_trainable(model.trace_readout, True)
             _set_trainable(model.trace_struct_head, True)
             _set_trainable(model.structured_answer_head, True)
+            _set_trainable(model.trace_state_regression_head, True)
             stage3_params += list(model.trace_predictor.parameters())
             stage3_params += list(model.trace_readout.parameters())
             stage3_params += list(model.trace_struct_head.parameters())
             stage3_params += list(model.structured_answer_head.parameters())
+            stage3_params += list(model.trace_state_regression_head.parameters())
             if args.use_trace_fusion:
                 _set_trainable(model.trace_struct_summary, True)
                 _set_trainable(model.trace_fusion, True)
@@ -841,11 +903,41 @@ def main() -> None:
         for module in model.children():
             _set_trainable(module, False)
         _set_trainable(model.trace_struct_head, True)
+        _set_trainable(model.trace_state_regression_head, args.trace_state_weight > 0)
+        params = list(model.trace_struct_head.parameters())
+        if args.trace_state_weight > 0:
+            params += list(model.trace_state_regression_head.parameters())
         optimizer = torch.optim.AdamW(
-            model.trace_struct_head.parameters(), lr=args.lr, weight_decay=0.01
+            params, lr=args.lr, weight_decay=0.01
         )
         best_acc = run_stage(
             name="trace_ops_head",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.trace_ops_head_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
+
+    if "trace_state_head" in requested_stages or "tsh" in requested_stages:
+        if not args.use_reasoning_trace:
+            raise ValueError("trace_state_head requires --use-reasoning-trace")
+        for module in model.children():
+            _set_trainable(module, False)
+        _set_trainable(model.trace_state_regression_head, True)
+        optimizer = torch.optim.AdamW(
+            model.trace_state_regression_head.parameters(), lr=args.lr, weight_decay=0.01
+        )
+        best_acc = run_stage(
+            name="trace_state_head",
             model=model,
             loader=loader,
             val_dataset=val_dataset,

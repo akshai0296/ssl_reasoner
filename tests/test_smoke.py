@@ -8,10 +8,11 @@ from ssl_reasoner.data import (
     generate_math_examples,
     make_trace,
     make_trace_fields,
+    make_trace_state_targets,
 )
 from ssl_reasoner.diagnostics import latent_health
 from ssl_reasoner.model import LatentVerifier, MathJEPAReadout
-from ssl_reasoner.solver import solve_problem_texts
+from ssl_reasoner.solver import solve_problem_texts, trace_final_value_index
 from ssl_reasoner.tokenizer import build_math_tokenizer
 from ssl_reasoner.verifier import operation_candidate_text, symbolic_candidate_texts
 
@@ -166,6 +167,12 @@ def test_operation_candidate_text_executes_predicted_operation_order():
     assert operation_candidate_text("Find 30+10+5-5.", [1, 1]) is None
 
 
+def test_trace_final_value_index_selects_last_predicted_state():
+    assert trace_final_value_index("Calculate 9-4.") == 2
+    assert trace_final_value_index("What is 2+3*4?") == 5
+    assert trace_final_value_index("Find 30+10+5-5.") is None
+
+
 def test_solve_problem_texts_uses_operation_then_readout_fallback():
     tokenizer = build_math_tokenizer()
 
@@ -188,6 +195,7 @@ def test_solve_problem_texts_uses_operation_then_readout_fallback():
             logits = torch.full((pooled.size(0), 8 + 6 * 1401), -10.0)
             logits[0, 3] = 10.0
             logits[0, 4 + 1] = 10.0
+            logits[0, 8 + 5 * 1401 + 214] = 10.0
             if pooled.size(0) > 1:
                 logits[1, 1] = 10.0
                 logits[1, 4] = 10.0
@@ -204,6 +212,8 @@ def test_solve_problem_texts_uses_operation_then_readout_fallback():
 
     assert results[0].answer == "14"
     assert results[0].mode == "operation"
+    assert results[0].trace_state_answer == "14"
+    assert results[0].trace_state_confidence > 0.99
     assert results[0].min_operation_confidence > 0.99
     assert results[0].readout_answer == "999"
     assert results[1].answer == "42"
@@ -240,6 +250,12 @@ def test_structured_trace_fields_respect_precedence():
     assert op_ids == [3, 1]
     assert values == [201, 200, 200, 220, 200, 220]
     assert mask == [1.0] * 6
+
+
+def test_trace_state_targets_keep_unclamped_final_values():
+    values, mask = make_trace_state_targets("49-41*16")
+    assert values == [656.0, -607.0]
+    assert mask == [1.0, 1.0]
 
 
 def test_cross_attention_with_math_features_forward():
@@ -297,6 +313,7 @@ def test_reasoning_trace_forward():
     )
     decoded_trace = model.solve_trace_ids(problem_ids, pad_id=tokenizer.pad_id, math_ids=math_ids)
     pred_ops, pred_values = model.predict_structured_trace(problem_ids, math_ids=math_ids)
+    state_values = model.predict_trace_state_values(problem_ids, math_ids=math_ids)
     reason_ops, reason_values = model.predict_reasoning_struct(problem_ids, math_ids=math_ids)
     answer_pred, answer_conf = model.predict_structured_answer(problem_ids, math_ids=math_ids)
 
@@ -307,6 +324,7 @@ def test_reasoning_trace_forward():
     assert len(decoded_trace) == 4
     assert pred_ops.shape == (4, 2)
     assert pred_values.shape == (4, 6)
+    assert state_values.shape == (4, 2)
     assert reason_ops.shape == (4, 2)
     assert reason_values.shape == (4, 2)
     assert answer_pred.shape == (4,)

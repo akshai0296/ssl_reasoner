@@ -5,7 +5,12 @@ import re
 
 import torch
 
-from .data import MATH_FEATURE_VOCAB_SIZE, encode_math_features
+from .data import (
+    MATH_FEATURE_VOCAB_SIZE,
+    TRACE_VALUE_CLASSES,
+    class_to_value,
+    encode_math_features,
+)
 from .model import MathJEPAReadout
 from .tokenizer import CharTokenizer, build_math_tokenizer
 from .verifier import extract_expression, operation_candidate_text
@@ -17,10 +22,12 @@ class MathSolveResult:
     answer: str
     mode: str
     operation_answer: str | None
+    trace_state_answer: str | None
     parsed_expression_answer: str | None
     readout_answer: str
     operation_ids: list[int]
     operation_confidences: list[float]
+    trace_state_confidence: float
     min_operation_confidence: float
 
 
@@ -34,6 +41,18 @@ def operation_confidence_count(problem: str) -> int:
     if len(parts) == 5:
         return 2
     return 0
+
+
+def trace_final_value_index(problem: str) -> int | None:
+    expr = extract_expression(problem)
+    if expr is None:
+        return None
+    parts = re.split(r"([+\-*])", expr)
+    if len(parts) == 3:
+        return 2
+    if len(parts) == 5:
+        return 5
+    return None
 
 
 def parsed_expression_answer(problem: str) -> str | None:
@@ -124,6 +143,61 @@ def predict_trace_operation_ids(
 
 
 @torch.no_grad()
+def predict_trace_state_answers(
+    model: MathJEPAReadout,
+    problem_ids: torch.Tensor,
+    math_ids: torch.Tensor,
+    problems: list[str],
+) -> tuple[list[str | None], list[float]]:
+    if not model.use_reasoning_trace:
+        return [None for _ in problems], [0.0 for _ in problems]
+    slots = model.predict_trace_slots(problem_ids, math_ids)
+    pred = model.trace_struct_head(slots.mean(dim=1))
+    value_probs = pred[:, 8:].view(-1, 6, TRACE_VALUE_CLASSES).softmax(dim=-1)
+    value_confidences, value_ids = value_probs.max(dim=-1)
+    answers: list[str | None] = []
+    confidences: list[float] = []
+    for problem, row, conf_row in zip(
+        problems,
+        value_ids.detach().cpu().tolist(),
+        value_confidences.detach().cpu().tolist(),
+    ):
+        final_idx = trace_final_value_index(problem)
+        if final_idx is None:
+            answers.append(None)
+            confidences.append(0.0)
+            continue
+        answers.append(str(class_to_value(int(row[final_idx]))))
+        confidences.append(float(conf_row[final_idx]))
+    return answers, confidences
+
+
+@torch.no_grad()
+def predict_trace_state_regression_answers(
+    model: MathJEPAReadout,
+    problem_ids: torch.Tensor,
+    math_ids: torch.Tensor,
+    problems: list[str],
+) -> tuple[list[str | None], list[float]]:
+    if not model.use_reasoning_trace:
+        return [None for _ in problems], [0.0 for _ in problems]
+    pred_values = model.predict_trace_state_values(problem_ids, math_ids)
+    answers: list[str | None] = []
+    confidences: list[float] = []
+    for problem, values in zip(problems, pred_values.detach().cpu()):
+        final_idx = trace_final_value_index(problem)
+        if final_idx is None:
+            answers.append(None)
+            confidences.append(0.0)
+            continue
+        state_idx = 1 if final_idx == 5 else 0
+        value = float(values[state_idx].item())
+        answers.append(str(int(round(value))))
+        confidences.append(1.0)
+    return answers, confidences
+
+
+@torch.no_grad()
 def solve_problem_texts(
     model: MathJEPAReadout,
     tokenizer: CharTokenizer,
@@ -151,9 +225,27 @@ def solve_problem_texts(
         readout_answers = [tokenizer.decode(ids).strip() for ids in decoded]
 
         op_rows, confidence_rows = predict_trace_operation_ids(model, problem_ids, math_ids)
+        state_answers, state_confidences = predict_trace_state_answers(
+            model,
+            problem_ids,
+            math_ids,
+            batch_problems,
+        )
 
-        for problem, op_row, confidence_row, readout_answer in zip(
-            batch_problems, op_rows, confidence_rows, readout_answers
+        for (
+            problem,
+            op_row,
+            confidence_row,
+            state_answer,
+            state_confidence,
+            readout_answer,
+        ) in zip(
+            batch_problems,
+            op_rows,
+            confidence_rows,
+            state_answers,
+            state_confidences,
+            readout_answers,
         ):
             operation_answer = operation_candidate_text(problem, op_row)
             parsed_answer = (
@@ -183,10 +275,12 @@ def solve_problem_texts(
                     answer=answer,
                     mode=mode,
                     operation_answer=operation_answer,
+                    trace_state_answer=state_answer,
                     parsed_expression_answer=parsed_answer,
                     readout_answer=readout_answer,
                     operation_ids=[int(idx) for idx in op_row],
                     operation_confidences=[float(conf) for conf in confidence_row],
+                    trace_state_confidence=float(state_confidence),
                     min_operation_confidence=float(min_confidence),
                 )
             )

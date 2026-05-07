@@ -124,6 +124,44 @@ This fine-tune adds a supervised answer-latent contrastive loss. Samples with th
 numeric answer are treated as positives instead of false negatives, while different
 answers remain negatives.
 
+## Mixed Trace State Path
+
+The operation solver uses learned operation predictions, then applies those operations
+to the expression from the prompt. To inspect the more fully learned path, use the trace
+state solver. It answers from the model's predicted intermediate/final trace values:
+
+```bash
+bash scripts/finetune_trace_state_head.sh
+bash scripts/eval_trace_state_solver.sh
+```
+
+For a mixed expression such as `20+1*0`, the trace state target is:
+
+```text
+1*0=0 20+0=20
+```
+
+The state solver reads the final predicted state (`20`) instead of recomputing it from
+the prompt.
+
+The continuous state variant avoids the fixed value-class range by regressing the
+intermediate and final numeric states directly:
+
+```bash
+bash scripts/train_trace_state_regression.sh
+bash scripts/eval_trace_state_regression.sh
+```
+
+To fine-tune the trace predictor and continuous state head together:
+
+```bash
+bash scripts/finetune_trace_state_joint.sh
+CHECKPOINT=checkpoints/trace_state_joint/best.pt bash scripts/eval_trace_state_regression.sh
+```
+
+Current result: this improves the mixed direct readout somewhat, but the learned
+continuous final-state path is still not exact enough to replace the operation solver.
+
 ## Smoke Train
 
 ```bash

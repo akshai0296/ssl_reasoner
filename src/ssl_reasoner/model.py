@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 TRACE_VALUE_CLASSES = 1401
+TRACE_STATE_SCALE = 100.0
 
 
 class MeanPoolEncoder(nn.Module):
@@ -324,6 +325,12 @@ class MathJEPAReadout(nn.Module):
                 nn.GELU(),
                 nn.Linear(d_model, TRACE_VALUE_CLASSES),
             )
+            self.trace_state_regression_head = nn.Sequential(
+                nn.LayerNorm(d_model),
+                nn.Linear(d_model, d_model),
+                nn.GELU(),
+                nn.Linear(d_model, 2),
+            )
             if use_trace_fusion:
                 self.trace_struct_summary = nn.Sequential(
                     nn.LayerNorm(8 + 6 * TRACE_VALUE_CLASSES),
@@ -530,6 +537,34 @@ class MathJEPAReadout(nn.Module):
             "structured_answer_acc": acc,
         }
 
+    def trace_state_regression_loss(
+        self,
+        slots: torch.Tensor,
+        trace_state_values: torch.Tensor,
+        trace_state_mask: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        pred = self.trace_state_regression_head(slots.mean(dim=1))
+        target = trace_state_values / TRACE_STATE_SCALE
+        per_value = F.smooth_l1_loss(pred, target, reduction="none")
+        loss = (per_value * trace_state_mask).sum() / trace_state_mask.sum().clamp(min=1.0)
+        rounded = (pred * TRACE_STATE_SCALE).round()
+        acc = (
+            (rounded == trace_state_values).float() * trace_state_mask
+        ).sum() / trace_state_mask.sum().clamp(min=1.0)
+        final_target = torch.where(
+            trace_state_mask[:, 1].bool(),
+            trace_state_values[:, 1],
+            trace_state_values[:, 0],
+        )
+        final_pred = torch.where(trace_state_mask[:, 1].bool(), rounded[:, 1], rounded[:, 0])
+        final_acc = (final_pred == final_target).float().mean()
+        return {
+            "loss": loss,
+            "trace_state_regression_loss": loss,
+            "trace_state_regression_acc": acc,
+            "trace_state_final_acc": final_acc,
+        }
+
     def answer_value_loss(
         self, slots: torch.Tensor, answer_value_id: torch.Tensor
     ) -> dict[str, torch.Tensor]:
@@ -641,6 +676,8 @@ class MathJEPAReadout(nn.Module):
         trace_op_ids: torch.Tensor | None = None,
         trace_value_ids: torch.Tensor | None = None,
         trace_value_mask: torch.Tensor | None = None,
+        trace_state_values: torch.Tensor | None = None,
+        trace_state_mask: torch.Tensor | None = None,
         answer_value_id: torch.Tensor | None = None,
         trace_weight: float = 0.5,
         trace_struct_weight: float = 1.0,
@@ -752,6 +789,22 @@ class MathJEPAReadout(nn.Module):
                 trace_aux_loss = trace_aux_loss + structured_answer_weight * answer_struct["loss"]
                 result["structured_answer_loss"] = answer_struct["structured_answer_loss"]
                 result["structured_answer_acc"] = answer_struct["structured_answer_acc"]
+            if trace_state_values is not None and trace_state_mask is not None:
+                state_regression = self.trace_state_regression_loss(
+                    trace_pred_slots,
+                    trace_state_values,
+                    trace_state_mask,
+                )
+                trace_aux_loss = trace_aux_loss + state_regression["loss"]
+                result["trace_state_regression_loss"] = state_regression[
+                    "trace_state_regression_loss"
+                ]
+                result["trace_state_regression_acc"] = state_regression[
+                    "trace_state_regression_acc"
+                ]
+                result["trace_state_final_acc"] = state_regression[
+                    "trace_state_final_acc"
+                ]
             result["loss"] = result["loss"] + trace_weight * trace_aux_loss
             result["trace_pred_loss"] = trace_pred_loss
             result["trace_contrastive_loss"] = trace_contrastive_loss
@@ -770,6 +823,8 @@ class MathJEPAReadout(nn.Module):
         trace_op_ids: torch.Tensor | None = None,
         trace_value_ids: torch.Tensor | None = None,
         trace_value_mask: torch.Tensor | None = None,
+        trace_state_values: torch.Tensor | None = None,
+        trace_state_mask: torch.Tensor | None = None,
         answer_value_id: torch.Tensor | None = None,
         trace_weight: float = 0.5,
         trace_struct_weight: float = 1.0,
@@ -808,6 +863,8 @@ class MathJEPAReadout(nn.Module):
         trace_op_ids: torch.Tensor | None = None,
         trace_value_ids: torch.Tensor | None = None,
         trace_value_mask: torch.Tensor | None = None,
+        trace_state_values: torch.Tensor | None = None,
+        trace_state_mask: torch.Tensor | None = None,
         answer_value_id: torch.Tensor | None = None,
         pred_weight: float = 1.0,
         contrastive_weight: float = 0.1,
@@ -832,6 +889,8 @@ class MathJEPAReadout(nn.Module):
             trace_op_ids=trace_op_ids,
             trace_value_ids=trace_value_ids,
             trace_value_mask=trace_value_mask,
+            trace_state_values=trace_state_values,
+            trace_state_mask=trace_state_mask,
             answer_value_id=answer_value_id,
             trace_weight=trace_weight,
             trace_struct_weight=trace_struct_weight,
@@ -896,6 +955,9 @@ class MathJEPAReadout(nn.Module):
             "reasoning_struct_value_acc",
             "structured_answer_loss",
             "structured_answer_acc",
+            "trace_state_regression_loss",
+            "trace_state_regression_acc",
+            "trace_state_final_acc",
             "answer_contrastive_loss",
             "answer_value_loss",
             "answer_value_acc",
@@ -915,6 +977,8 @@ class MathJEPAReadout(nn.Module):
         trace_op_ids: torch.Tensor | None = None,
         trace_value_ids: torch.Tensor | None = None,
         trace_value_mask: torch.Tensor | None = None,
+        trace_state_values: torch.Tensor | None = None,
+        trace_state_mask: torch.Tensor | None = None,
         answer_value_id: torch.Tensor | None = None,
         trace_weight: float = 0.5,
         trace_struct_weight: float = 1.0,
@@ -931,6 +995,8 @@ class MathJEPAReadout(nn.Module):
             trace_op_ids=trace_op_ids,
             trace_value_ids=trace_value_ids,
             trace_value_mask=trace_value_mask,
+            trace_state_values=trace_state_values,
+            trace_state_mask=trace_state_mask,
             answer_value_id=answer_value_id,
             trace_weight=trace_weight,
             trace_struct_weight=trace_struct_weight,
@@ -967,6 +1033,9 @@ class MathJEPAReadout(nn.Module):
             "reasoning_struct_value_acc",
             "structured_answer_loss",
             "structured_answer_acc",
+            "trace_state_regression_loss",
+            "trace_state_regression_acc",
+            "trace_state_final_acc",
             "answer_contrastive_loss",
             "answer_value_loss",
             "answer_value_acc",
@@ -1002,6 +1071,13 @@ class MathJEPAReadout(nn.Module):
         trace_slots = self.predict_trace_slots(problem_ids, math_ids)
         logits = self.structured_answer_head(trace_slots.mean(dim=1))
         return logits.argmax(dim=-1), logits.softmax(dim=-1).max(dim=-1).values
+
+    @torch.no_grad()
+    def predict_trace_state_values(
+        self, problem_ids: torch.Tensor, math_ids: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        trace_slots = self.predict_trace_slots(problem_ids, math_ids)
+        return self.trace_state_regression_head(trace_slots.mean(dim=1)) * TRACE_STATE_SCALE
 
     @torch.no_grad()
     def predict_answer_value(

@@ -132,6 +132,25 @@ def make_trace_fields(expr: str) -> tuple[list[int], list[int], list[float]]:
     )
 
 
+def make_trace_state_targets(expr: str) -> tuple[list[float], list[float]]:
+    parts = re.split(r"([+\-*])", expr)
+    if len(parts) == 3:
+        value = float(eval(expr))
+        return [value, 0.0], [1.0, 0.0]
+    if len(parts) != 5:
+        value = float(eval(expr))
+        return [value, 0.0], [1.0, 0.0]
+
+    a, op1, b, op2, c = parts
+    if op2 == "*":
+        first_value = float(eval(f"{b}{op2}{c}"))
+        second_value = float(eval(f"{a}{op1}{int(first_value)}"))
+    else:
+        first_value = float(eval(f"{a}{op1}{b}"))
+        second_value = float(eval(f"{int(first_value)}{op2}{c}"))
+    return [first_value, second_value], [1.0, 1.0]
+
+
 def _rand_operand(rng: random.Random, bounds: tuple[int, int]) -> int:
     return rng.randint(bounds[0], bounds[1])
 
@@ -294,6 +313,9 @@ class MathDataset(Dataset):
         trace_op_ids, trace_values, trace_value_mask = make_trace_fields(
             re.search(r"\d+[+\-*]\d+(?:[+\-*]\d+)?", ex.problem).group(0)
         )
+        trace_state_values, trace_state_mask = make_trace_state_targets(
+            re.search(r"\d+[+\-*]\d+(?:[+\-*]\d+)?", ex.problem).group(0)
+        )
         answer_len = min(len(ex.answer) + 2, self.max_answer_len)
         trace_len = min(len(ex.trace) + 2, self.max_trace_len)
         return {
@@ -306,6 +328,8 @@ class MathDataset(Dataset):
             "trace_op_ids": torch.tensor(trace_op_ids, dtype=torch.long),
             "trace_value_ids": torch.tensor(trace_values, dtype=torch.long),
             "trace_value_mask": torch.tensor(trace_value_mask, dtype=torch.float),
+            "trace_state_values": torch.tensor(trace_state_values, dtype=torch.float),
+            "trace_state_mask": torch.tensor(trace_state_mask, dtype=torch.float),
             "answer_value_id": torch.tensor(value_to_class(ex.answer), dtype=torch.long),
             "answer": ex.answer,
             "trace": ex.trace,

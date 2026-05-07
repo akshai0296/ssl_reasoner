@@ -45,6 +45,8 @@ def main() -> None:
                 f"op_conf={result.operation_confidences} "
                 f"min_op_conf={result.min_operation_confidence:.3f} "
                 f"op_answer={result.operation_answer!r} "
+                f"trace_state_answer={result.trace_state_answer!r} "
+                f"trace_state_conf={result.trace_state_confidence:.3f} "
                 f"parsed_answer={result.parsed_expression_answer!r} "
                 f"readout={result.readout_answer!r} "
                 f"problem={result.problem!r}"
