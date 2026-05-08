@@ -313,6 +313,8 @@ CHECKPOINT=checkpoints/variable_reasoner/best.pt \
   bash scripts/eval_variable_reasoning.sh --learned --learned-values
 CHECKPOINT=checkpoints/variable_reasoner/best.pt \
   bash scripts/eval_variable_reasoning.sh --learned --learned-values --preset all
+CHECKPOINT=checkpoints/variable_reasoner/best.pt \
+  bash scripts/eval_variable_reasoning.sh --learned --learned-values --unconstrained --preset all
 ```
 
 Current learned baseline result:
@@ -347,6 +349,17 @@ distribution-bound:
 The variable reasoner now trains with a balanced multi-step curriculum and a 10-token
 math feature window, covering standard, longer, no-multiply, and many-multiply
 expressions. The main remaining gap in this OOD set is rare larger-number misses.
+
+Without legal/canonical inference constraints, the learned pointer policy is weaker but
+still usually chooses valid reductions:
+
+| Preset | Unconstrained trace equivalent exact | Unconstrained final value exact |
+| --- | ---: | ---: |
+| `in_dist` | `0.986` | `0.986` |
+| `larger_numbers` | `0.988` | `0.988` |
+| `longer_expr` | `0.870` | `0.870` |
+| `no_multiply` | `0.766` | `0.766` |
+| `many_multiply` | `1.000` | `1.000` |
 
 ## Smoke Train
 

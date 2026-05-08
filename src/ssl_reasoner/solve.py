@@ -42,7 +42,13 @@ def trace_step_dicts(trace: str) -> list[dict[str, int | str]]:
 
 
 @torch.no_grad()
-def solve_variable_debug(model, problems: list[str], train_args: dict, device: torch.device) -> list[dict]:
+def solve_variable_debug(
+    model,
+    problems: list[str],
+    train_args: dict,
+    device: torch.device,
+    constrain_to_legal: bool = True,
+) -> list[dict]:
     max_math_len = train_args.get("max_math_len", 8)
     math_ids = torch.tensor(
         [encode_math_features(problem, max_math_len) for problem in problems],
@@ -51,7 +57,7 @@ def solve_variable_debug(model, problems: list[str], train_args: dict, device: t
     )
     traces = model.solve_variable_reasoning_texts(
         math_ids,
-        constrain_to_legal=True,
+        constrain_to_legal=constrain_to_legal,
         learned_values=True,
     )
     rows = []
@@ -82,6 +88,7 @@ def main() -> None:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--debug-reasoning", action="store_true")
+    parser.add_argument("--unconstrained", action="store_true")
     parser.add_argument("problems", nargs="+")
     args = parser.parse_args()
 
@@ -91,7 +98,13 @@ def main() -> None:
     if use_variable_debug or (
         args.debug_reasoning and not train_args.get("_checkpoint_has_step_state_head", False)
     ):
-        rows = solve_variable_debug(model, args.problems, train_args, device)
+        rows = solve_variable_debug(
+            model,
+            args.problems,
+            train_args,
+            device,
+            constrain_to_legal=not args.unconstrained,
+        )
         if args.json:
             print(json.dumps(rows, indent=2))
             return
