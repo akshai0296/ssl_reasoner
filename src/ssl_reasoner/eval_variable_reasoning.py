@@ -98,6 +98,23 @@ def trace_step_values(trace: str) -> list[list[int]]:
     return values
 
 
+def trace_step_dicts(trace: str) -> list[dict[str, int | str]]:
+    steps = []
+    for part in [part for part in trace.split(",") if part][:-1]:
+        match = TRACE_STEP_RE.match(part)
+        if match is None:
+            continue
+        steps.append(
+            {
+                "lhs": int(match.group(1)),
+                "op": match.group(2),
+                "rhs": int(match.group(3)),
+                "result": int(match.group(4)),
+            }
+        )
+    return steps
+
+
 def make_eval_example(expr: str, rng: random.Random, split_label: str) -> MathExample:
     template = rng.choice(
         [
@@ -264,12 +281,21 @@ def evaluate_problem(
         learned_values=args.learned_values,
     )
     pred_trace = traces[0]
+    final = trace_final_value(pred_trace)
+    target_trace = make_reasoning_text(expr)
+    print(f"answer: {final}")
+    print("mode: variable_reasoner")
     print(f"problem: {args.problem}")
-    print(f"target_answer: {eval(expr)}")
-    print(f"pred_answer: {trace_final_value(pred_trace)}")
+    for idx, step in enumerate(trace_step_dicts(pred_trace), start=1):
+        print(
+            f"step{idx}: lhs={step['lhs']} op={step['op']} "
+            f"rhs={step['rhs']} result={step['result']}"
+        )
+    print(f"final: {final}")
     print(f"trace: {pred_trace}")
-    print(f"target_trace: {make_reasoning_text(expr)}")
-    print(f"trace_exact: {pred_trace == make_reasoning_text(expr)}")
+    print(f"target_answer: {eval(expr)}")
+    print(f"target_trace: {target_trace}")
+    print(f"trace_exact: {pred_trace == target_trace}")
     print(f"trace_equiv: {trace_is_equivalent(expr, pred_trace)}")
 
 
