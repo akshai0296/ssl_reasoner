@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import operator
 import random
 import re
 from dataclasses import dataclass
@@ -30,7 +32,29 @@ TRACE_OP_TO_ID = {"none": 0, "+": 1, "-": 2, "*": 3}
 TRACE_VALUE_MIN = -200
 TRACE_VALUE_MAX = 1200
 TRACE_VALUE_CLASSES = TRACE_VALUE_MAX - TRACE_VALUE_MIN + 1
-EXPR_RE = re.compile(r"\d+(?:[+\-*]\d+)+")
+EXPR_RE = re.compile(r"\(?\d[\d+\-*() ]*[+\-*][\d+\-*() ]*\d\)?")
+SAFE_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.USub: operator.neg,
+}
+
+
+def safe_eval_expression(expr: str) -> int:
+    """Evaluate integer +, -, *, and parentheses without exposing Python eval."""
+    def _eval(node: ast.AST) -> int:
+        if isinstance(node, ast.Expression):
+            return _eval(node.body)
+        if isinstance(node, ast.Constant) and isinstance(node.value, int):
+            return int(node.value)
+        if isinstance(node, ast.UnaryOp) and type(node.op) in SAFE_OPS:
+            return SAFE_OPS[type(node.op)](_eval(node.operand))
+        if isinstance(node, ast.BinOp) and type(node.op) in SAFE_OPS:
+            return SAFE_OPS[type(node.op)](_eval(node.left), _eval(node.right))
+        raise ValueError(f"Unsupported arithmetic expression: {expr!r}")
+
+    return _eval(ast.parse(expr, mode="eval"))
 
 
 def encode_math_features(problem: str, max_len: int = 8) -> list[int]:
@@ -55,7 +79,17 @@ def extract_math_expression(problem: str) -> str:
     match = EXPR_RE.search(problem)
     if match is None:
         raise ValueError(f"No arithmetic expression found in: {problem!r}")
-    return match.group(0)
+    return match.group(0).replace(" ", "")
+
+
+def _find_innermost_parenthesized(expr: str) -> tuple[int, int] | None:
+    for end, char in enumerate(expr):
+        if char != ")":
+            continue
+        start = expr.rfind("(", 0, end)
+        if start >= 0:
+            return start, end + 1
+    return None
 
 
 def make_variable_trace_steps(expr: str) -> list[tuple[int, str, int, int]]:
@@ -68,6 +102,21 @@ def make_variable_trace_steps(expr: str) -> list[tuple[int, str, int, int]]:
 def make_variable_trace_steps_with_positions(
     expr: str,
 ) -> list[tuple[int, str, int, int, int]]:
+    expr = expr.replace(" ", "")
+    if "(" in expr or ")" in expr:
+        working = expr
+        steps: list[tuple[int, str, int, int, int]] = []
+        while True:
+            span = _find_innermost_parenthesized(working)
+            if span is None:
+                break
+            start, end = span
+            inner = working[start + 1 : end - 1]
+            steps.extend(make_variable_trace_steps_with_positions(inner))
+            working = f"{working[:start]}{safe_eval_expression(inner)}{working[end:]}"
+        steps.extend(make_variable_trace_steps_with_positions(working))
+        return steps
+
     parts = re.split(r"([+\-*])", expr)
     values = [int(parts[idx]) for idx in range(0, len(parts), 2)]
     ops = [parts[idx] for idx in range(1, len(parts), 2)]
@@ -103,6 +152,15 @@ def make_variable_trace_steps_with_legal_masks(
     expr: str,
     max_steps: int = 4,
 ) -> tuple[list[tuple[int, str, int, int, int]], list[list[float]]]:
+    if "(" in expr or ")" in expr:
+        steps = make_variable_trace_steps_with_positions(expr)[:max_steps]
+        legal_masks = []
+        for step_idx, *_ in enumerate(steps):
+            row = [0.0] * max_steps
+            row[min(step_idx, max_steps - 1)] = 1.0
+            legal_masks.append(row)
+        return steps, legal_masks
+
     parts = re.split(r"([+\-*])", expr)
     values = [int(parts[idx]) for idx in range(0, len(parts), 2)]
     ops = [parts[idx] for idx in range(1, len(parts), 2)]
@@ -148,12 +206,12 @@ def make_trace(expr: str) -> str:
 
 def make_reasoning_text(expr: str) -> str:
     trace = make_trace(expr)
-    return f"{trace.replace(' ', ',')},{eval(expr)}"
+    return f"{trace.replace(' ', ',')},{safe_eval_expression(expr)}"
 
 
 def make_reasoning_step_texts(expr: str) -> tuple[list[str], list[float]]:
     trace_parts = make_trace(expr).split()
-    answer = str(eval(expr))
+    answer = str(safe_eval_expression(expr))
     if len(trace_parts) == 1:
         return [trace_parts[0], answer, ""], [1.0, 1.0, 0.0]
     return [trace_parts[0], trace_parts[1], answer], [1.0, 1.0, 1.0]
@@ -193,7 +251,7 @@ def make_trace_fields(expr: str) -> tuple[list[int], list[int], list[float]]:
     parts = re.split(r"([+\-*])", expr)
     if len(parts) == 3:
         a, op, b = parts
-        value = eval(expr)
+        value = safe_eval_expression(expr)
         return (
             [TRACE_OP_TO_ID[op], TRACE_OP_TO_ID["none"]],
             [_value_to_class(v) for v in [float(a), float(b), float(value), 0.0, 0.0, 0.0]],
@@ -201,7 +259,7 @@ def make_trace_fields(expr: str) -> tuple[list[int], list[int], list[float]]:
         )
 
     if len(parts) != 5:
-        value = eval(expr)
+        value = safe_eval_expression(expr)
         return (
             [TRACE_OP_TO_ID["none"], TRACE_OP_TO_ID["none"]],
             [_value_to_class(v) for v in [float(value), 0.0, float(value), 0.0, 0.0, 0.0]],
@@ -213,7 +271,7 @@ def make_trace_fields(expr: str) -> tuple[list[int], list[int], list[float]]:
         first_lhs = float(b)
         first_rhs = float(c)
         first_op = op2
-        first_value = eval(f"{b}{op2}{c}")
+        first_value = safe_eval_expression(f"{b}{op2}{c}")
         second_lhs = float(a)
         second_rhs = float(first_value)
         second_op = op1
@@ -221,11 +279,11 @@ def make_trace_fields(expr: str) -> tuple[list[int], list[int], list[float]]:
         first_lhs = float(a)
         first_rhs = float(b)
         first_op = op1
-        first_value = eval(f"{a}{op1}{b}")
+        first_value = safe_eval_expression(f"{a}{op1}{b}")
         second_lhs = float(first_value)
         second_rhs = float(c)
         second_op = op2
-    second_value = eval(f"{int(second_lhs)}{second_op}{int(second_rhs)}")
+    second_value = safe_eval_expression(f"{int(second_lhs)}{second_op}{int(second_rhs)}")
     return (
         [TRACE_OP_TO_ID[first_op], TRACE_OP_TO_ID[second_op]],
         [_value_to_class(v) for v in [
@@ -243,19 +301,19 @@ def make_trace_fields(expr: str) -> tuple[list[int], list[int], list[float]]:
 def make_trace_state_targets(expr: str) -> tuple[list[float], list[float]]:
     parts = re.split(r"([+\-*])", expr)
     if len(parts) == 3:
-        value = float(eval(expr))
+        value = float(safe_eval_expression(expr))
         return [value, 0.0], [1.0, 0.0]
     if len(parts) != 5:
-        value = float(eval(expr))
+        value = float(safe_eval_expression(expr))
         return [value, 0.0], [1.0, 0.0]
 
     a, op1, b, op2, c = parts
     if op2 == "*":
-        first_value = float(eval(f"{b}{op2}{c}"))
-        second_value = float(eval(f"{a}{op1}{int(first_value)}"))
+        first_value = float(safe_eval_expression(f"{b}{op2}{c}"))
+        second_value = float(safe_eval_expression(f"{a}{op1}{int(first_value)}"))
     else:
-        first_value = float(eval(f"{a}{op1}{b}"))
-        second_value = float(eval(f"{int(first_value)}{op2}{c}"))
+        first_value = float(safe_eval_expression(f"{a}{op1}{b}"))
+        second_value = float(safe_eval_expression(f"{int(first_value)}{op2}{c}"))
     return [first_value, second_value], [1.0, 1.0]
 
 
@@ -281,7 +339,7 @@ def _make_expression(
         if op == "-":
             a, b = max(a, b), min(a, b)
         expr = f"{a}{op}{b}"
-        return expr, eval(expr), op
+        return expr, safe_eval_expression(expr), op
 
     if difficulty == 2:
         operands = [_rand_operand(rng, (0, 50))]
@@ -292,7 +350,7 @@ def _make_expression(
         expr = "".join(
             f"{value}{op}" for value, op in zip(operands, expr_ops)
         ) + str(operands[-1])
-        return expr, eval(expr), "multi_step"
+        return expr, safe_eval_expression(expr), "multi_step"
 
     a = _rand_operand(rng, mixed_ab_bounds)
     b = _rand_operand(rng, mixed_ab_bounds)
@@ -300,7 +358,7 @@ def _make_expression(
     op1 = rng.choice(["+", "-"])
     op2 = rng.choice(["+", "-", "*"])
     expr = f"{a}{op1}{b}{op2}{c}"
-    return expr, eval(expr), "mixed"
+    return expr, safe_eval_expression(expr), "mixed"
 
 
 def _make_multi_step_expression(
@@ -324,7 +382,7 @@ def _make_multi_step_expression(
     expr = "".join(
         f"{value}{op_text}" for value, op_text in zip(operands, expr_ops)
     ) + str(operands[-1])
-    return expr, eval(expr), "multi_step"
+    return expr, safe_eval_expression(expr), "multi_step"
 
 
 COMPOSITIONAL_CURRICULA = {

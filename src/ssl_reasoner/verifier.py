@@ -13,13 +13,13 @@ from .data import (
     MATH_FEATURE_VOCAB_SIZE,
     MathDataset,
     class_to_value,
+    extract_math_expression,
     generate_math_examples,
 )
 from .model import LatentVerifier, MathJEPAReadout
 from .tokenizer import build_math_tokenizer
 
 TRACE_ID_TO_OP = {0: "none", 1: "+", 2: "-", 3: "*"}
-EXPRESSION_RE = re.compile(r"\d+(?:[+\-*]\d+)+")
 
 
 def _device(name: str) -> torch.device:
@@ -73,10 +73,10 @@ def _apply_op(lhs: int, op: str, rhs: int) -> int:
 
 
 def extract_expression(problem: str) -> str | None:
-    match = EXPRESSION_RE.search(problem)
-    if match is None:
+    try:
+        return extract_math_expression(problem)
+    except ValueError:
         return None
-    return match.group(0)
 
 
 def operation_candidate_text(
@@ -85,6 +85,8 @@ def operation_candidate_text(
 ) -> str | None:
     expr = extract_expression(problem)
     if expr is None:
+        return None
+    if "(" in expr or ")" in expr:
         return None
     parts = re.split(r"([+\-*])", expr)
     ops = [TRACE_ID_TO_OP.get(int(idx), "none") for idx in op_ids]

@@ -13,6 +13,7 @@ VALUE_CONDITIONED_MAX = 1200
 VALUE_CONDITIONED_CLASSES = VALUE_CONDITIONED_MAX - VALUE_CONDITIONED_MIN + 1
 TRACE_STATE_SCALE = 100.0
 VARIABLE_REASONING_SCALE = 100.0
+RAW_VARIABLE_VALUE_LOSS_WEIGHT = 0.01
 MAX_VARIABLE_REASONING_STEPS = 16
 MATH_FEATURE_NUM_OFFSET = 1
 MATH_FEATURE_PLUS_ID = 202
@@ -467,6 +468,12 @@ class VariableStructuredReasoner(nn.Module):
             nn.GELU(),
             nn.Linear(d_model, 3),
         )
+        self.raw_result_head = nn.Sequential(
+            nn.LayerNorm(d_model + 5),
+            nn.Linear(d_model + 5, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, 1),
+        )
 
     def pointer_logits_for_ops(
         self,
@@ -536,6 +543,16 @@ class VariableStructuredReasoner(nn.Module):
         rhs: torch.Tensor,
         op_ids: torch.Tensor,
     ) -> torch.Tensor:
+        features = self._transition_features(hidden, lhs, rhs, op_ids)
+        return self.result_head(features)
+
+    def _transition_features(
+        self,
+        hidden: torch.Tensor,
+        lhs: torch.Tensor,
+        rhs: torch.Tensor,
+        op_ids: torch.Tensor,
+    ) -> torch.Tensor:
         op_features = F.one_hot(op_ids.clamp(min=0, max=3), num_classes=4).to(hidden.dtype)
         value_features = torch.stack(
             [
@@ -545,8 +562,17 @@ class VariableStructuredReasoner(nn.Module):
             dim=-1,
         )
         # Drop the "none" op feature; active transition rows use +, -, or *.
-        features = torch.cat([hidden, value_features, op_features[:, 1:]], dim=-1)
-        return self.result_head(features)
+        return torch.cat([hidden, value_features, op_features[:, 1:]], dim=-1)
+
+    def raw_result_for_values(
+        self,
+        hidden: torch.Tensor,
+        lhs: torch.Tensor,
+        rhs: torch.Tensor,
+        op_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        features = self._transition_features(hidden, lhs, rhs, op_ids)
+        return self.raw_result_head(features).squeeze(-1) * VARIABLE_REASONING_SCALE
 
     @staticmethod
     def arithmetic_candidates(lhs: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
@@ -631,6 +657,20 @@ class VariableStructuredReasoner(nn.Module):
             reduction="none",
         ).view_as(step_mask)
         value_loss = (value_loss * step_mask).sum() / step_mask.sum().clamp(min=1.0)
+        raw_values = self.raw_result_for_values(
+            out["states"].reshape(-1, out["states"].size(-1)),
+            value_targets[:, :, 0].reshape(-1),
+            value_targets[:, :, 1].reshape(-1),
+            op_targets.reshape(-1),
+        ).view_as(step_mask)
+        raw_value_loss = F.smooth_l1_loss(
+            raw_values / VARIABLE_REASONING_SCALE,
+            value_targets[:, :, 2] / VARIABLE_REASONING_SCALE,
+            reduction="none",
+        )
+        raw_value_loss = (
+            raw_value_loss * step_mask
+        ).sum() / step_mask.sum().clamp(min=1.0)
         active_pred = out["active_logits"].sigmoid().ge(0.5).float()
         active_acc = (active_pred == step_mask).float().mean()
         op_acc = (
@@ -664,6 +704,9 @@ class VariableStructuredReasoner(nn.Module):
             ).float()
             * step_mask
         ).sum() / step_mask.sum().clamp(min=1.0)
+        raw_value_acc = (
+            (raw_values.round() == value_targets[:, :, 2].round()).float() * step_mask
+        ).sum() / step_mask.sum().clamp(min=1.0)
         return {
             "loss": (
                 active_loss
@@ -672,6 +715,7 @@ class VariableStructuredReasoner(nn.Module):
                 + position_loss
                 + legal_loss
                 + value_loss
+                + RAW_VARIABLE_VALUE_LOSS_WEIGHT * raw_value_loss
             ),
             "variable_active_loss": active_loss,
             "variable_op_loss": op_loss,
@@ -679,12 +723,14 @@ class VariableStructuredReasoner(nn.Module):
             "variable_position_loss": position_loss,
             "variable_legal_loss": legal_loss,
             "variable_value_loss": value_loss,
+            "variable_raw_value_loss": raw_value_loss,
             "variable_active_acc": active_acc,
             "variable_op_acc": op_acc,
             "variable_reduction_policy_acc": reduction_policy_acc,
             "variable_position_acc": position_acc,
             "variable_legal_acc": legal_acc,
             "variable_value_acc": value_acc,
+            "variable_raw_value_acc": raw_value_acc,
         }
 
 
@@ -1980,6 +2026,7 @@ class MathJEPAReadout(nn.Module):
         math_ids: torch.Tensor,
         constrain_to_legal: bool = True,
         learned_values: bool = False,
+        raw_learned_values: bool = False,
     ) -> list[str]:
         math_rows = math_ids.detach().cpu().tolist()
         hidden_rows = self.variable_structured_reasoner.initial_hidden(math_ids)
@@ -2035,7 +2082,17 @@ class MathJEPAReadout(nn.Module):
                     result = lhs * rhs
                 else:
                     break
-                if learned_values:
+                if raw_learned_values:
+                    lhs_tensor = torch.tensor([lhs], device=math_ids.device)
+                    rhs_tensor = torch.tensor([rhs], device=math_ids.device)
+                    raw_result = self.variable_structured_reasoner.raw_result_for_values(
+                        hidden,
+                        lhs_tensor,
+                        rhs_tensor,
+                        torch.tensor([op_id], device=math_ids.device),
+                    )
+                    result = int(round(float(raw_result[0].item())))
+                elif learned_values:
                     lhs_tensor = torch.tensor([lhs], device=math_ids.device)
                     rhs_tensor = torch.tensor([rhs], device=math_ids.device)
                     result_logits = self.variable_structured_reasoner.result_logits_for_values(

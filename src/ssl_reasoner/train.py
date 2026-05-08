@@ -13,6 +13,7 @@ from .data import (
     MathDataset,
     extract_math_expression,
     generate_math_examples,
+    safe_eval_expression,
 )
 from .diagnostics import latent_health
 from .model import MathJEPAReadout
@@ -291,7 +292,7 @@ def trace_is_equivalent(expr: str, trace: str) -> bool:
         final = int(trace_parts[-1])
     except (IndexError, ValueError):
         return False
-    return len(values) == 1 and final == values[0] == int(eval(expr))
+    return len(values) == 1 and final == values[0] == safe_eval_expression(expr)
 
 
 @torch.no_grad()
@@ -552,7 +553,7 @@ def run_stage(
                     trace_state_mask,
                     trace_op_ids,
                 )
-            elif name == "variable_reasoner":
+            elif name in {"variable_reasoner", "variable_raw_value_head"}:
                 out = model.variable_reasoning_loss(
                     math_ids,
                     variable_trace_op_ids,
@@ -663,7 +664,7 @@ def run_stage(
                         batch_size,
                         constrain_to_legal=False,
                     )
-                    if name == "variable_reasoner"
+                    if name in {"variable_reasoner", "variable_raw_value_head"}
                     else 0.0
                 )
                 metrics = " ".join(
@@ -686,6 +687,7 @@ def run_stage(
                         "variable_position_acc",
                         "variable_legal_acc",
                         "variable_value_acc",
+                        "variable_raw_value_acc",
                     }
                 )
                 print(
@@ -724,6 +726,7 @@ def run_stage(
                     "trace_state_head",
                     "step_state_head",
                     "variable_reasoner",
+                    "variable_raw_value_head",
                     "state_conditioned_latent",
                     "state_conditioned_joint",
                     "value_conditioned_latent",
@@ -752,6 +755,9 @@ def run_stage(
                         model, val_dataset, tokenizer, device, batch_size
                     )
                     if name == "reasoning_sequence"
+                    else variable_unconstrained_trace_acc
+                    + 0.001 * float(out.get("variable_raw_value_acc", torch.tensor(0.0)).item())
+                    if name == "variable_raw_value_head"
                     else variable_unconstrained_trace_acc
                     if name == "variable_reasoner"
                     else pred_acc
@@ -1265,6 +1271,32 @@ def main() -> None:
         )
         best_acc = run_stage(
             name="variable_reasoner",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.variable_reasoner_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
+
+    if "variable_raw_value_head" in requested_stages or "vrh" in requested_stages:
+        for module in model.children():
+            _set_trainable(module, False)
+        _set_trainable(model.variable_structured_reasoner.raw_result_head, True)
+        optimizer = torch.optim.AdamW(
+            model.variable_structured_reasoner.raw_result_head.parameters(),
+            lr=args.lr,
+            weight_decay=0.01,
+        )
+        best_acc = run_stage(
+            name="variable_raw_value_head",
             model=model,
             loader=loader,
             val_dataset=val_dataset,

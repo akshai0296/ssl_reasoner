@@ -14,6 +14,7 @@ from ssl_reasoner.data import (
     make_variable_trace_fields,
     make_variable_trace_steps,
     make_trace_state_targets,
+    safe_eval_expression,
 )
 from ssl_reasoner.diagnostics import latent_health
 from ssl_reasoner.eval_variable_reasoning import trace_final_value, trace_is_equivalent
@@ -32,7 +33,7 @@ def test_forward_shapes():
     answer_len = torch.stack([item["answer_len"] for item in batch])
     math_ids = torch.stack([item["math_ids"] for item in batch])
 
-    model = MathJEPAReadout(vocab_size=tokenizer.vocab_size)
+    model = MathJEPAReadout(vocab_size=tokenizer.vocab_size, max_variable_steps=4)
     out = model(problem_ids, answer_ids, answer_len, math_ids=math_ids)
 
     assert out["loss"].ndim == 0
@@ -48,7 +49,7 @@ def test_forward_shapes():
 def test_latent_health_keys():
     tokenizer = build_math_tokenizer()
     dataset = MathDataset(generate_math_examples(8), tokenizer)
-    model = MathJEPAReadout(vocab_size=tokenizer.vocab_size)
+    model = MathJEPAReadout(vocab_size=tokenizer.vocab_size, max_variable_steps=4)
     stats = latent_health(model, dataset, torch.device("cpu"), batch_size=4)
 
     assert "mean_random_cosine" in stats
@@ -145,6 +146,13 @@ def test_trace_respects_multiplication_precedence():
         ["1*0=0", "20+0=20", "20"],
         [1.0, 1.0, 1.0],
     )
+
+
+def test_trace_supports_parenthesized_expressions():
+    assert extract_math_expression("What is (3+8)*2?") == "(3+8)*2"
+    assert safe_eval_expression("(3+8)*2") == 22
+    assert make_trace("(3+8)*2") == "3+8=11 11*2=22"
+    assert make_reasoning_text("(3+8)*2") == "3+8=11,11*2=22,22"
 
 
 def test_structured_state_renderer_formats_reasoning_trace():
@@ -339,6 +347,17 @@ def test_solve_problem_texts_uses_operation_then_readout_fallback():
     assert parsed_results[0].mode == "parsed_expression"
     assert parsed_results[0].operation_answer is None
     assert parsed_results[0].parsed_expression_answer == "40"
+
+    parenthesized_results = solve_problem_texts(
+        FakeModel(),
+        tokenizer,
+        ["Find (3+8)*2."],
+        torch.device("cpu"),
+        max_problem_len=64,
+        max_math_len=8,
+    )
+    assert parenthesized_results[0].answer == "22"
+    assert parenthesized_results[0].mode == "parsed_expression"
 
 
 def test_structured_trace_fields_respect_precedence():
@@ -611,6 +630,36 @@ def test_stage3_joint_forward():
     assert out["reasoning_struct_op_loss"].ndim == 0
     assert out["reasoning_struct_value_loss"].ndim == 0
     assert out["pred_slots"].shape == (4, 8, 128)
+
+
+def test_variable_reasoner_has_raw_value_head():
+    tokenizer = build_math_tokenizer()
+    dataset = MathDataset(
+        generate_math_examples(4, seed=6, curriculum="multi_step"),
+        tokenizer,
+        max_variable_steps=4,
+    )
+    batch = [dataset[i] for i in range(4)]
+    math_ids = torch.stack([item["math_ids"] for item in batch])
+    op_ids = torch.stack([item["variable_trace_op_ids"] for item in batch])
+    position_ids = torch.stack([item["variable_trace_position_ids"] for item in batch])
+    values = torch.stack([item["variable_trace_values"] for item in batch])
+    legal_mask = torch.stack([item["variable_trace_legal_mask"] for item in batch])
+    step_mask = torch.stack([item["variable_trace_mask"] for item in batch])
+
+    model = MathJEPAReadout(vocab_size=tokenizer.vocab_size, max_variable_steps=4)
+    out = model.variable_reasoning_loss(
+        math_ids,
+        op_ids,
+        position_ids,
+        values,
+        legal_mask,
+        step_mask,
+    )
+
+    assert out["loss"].ndim == 0
+    assert out["variable_raw_value_loss"].ndim == 0
+    assert out["variable_raw_value_acc"].ndim == 0
 
 
 def test_latent_verifier_forward():

@@ -14,6 +14,7 @@ from .data import (
     make_trace,
     make_reasoning_text,
     make_variable_trace_fields,
+    safe_eval_expression,
 )
 from .solver import _device, load_math_solver
 
@@ -79,7 +80,7 @@ def trace_is_equivalent(expr: str, trace: str) -> bool:
         final = int(trace_parts[-1])
     except ValueError:
         return False
-    return final == values[0] == int(eval(expr))
+    return final == values[0] == safe_eval_expression(expr)
 
 
 def trace_final_value(trace: str) -> int | None:
@@ -129,7 +130,7 @@ def make_eval_example(expr: str, rng: random.Random, split_label: str) -> MathEx
     )
     return MathExample(
         problem=template.format(expr=expr),
-        answer=str(eval(expr)),
+        answer=str(safe_eval_expression(expr)),
         op_label=split_label,
         difficulty=2,
         trace=make_trace(expr),
@@ -200,7 +201,7 @@ def evaluate_preset(
     learned_final_value_correct = 0
     shown = 0
     learned_traces: list[str] | None = None
-    if args.learned:
+    if args.learned or args.learned_values or args.raw_learned_values:
         max_math_len = train_args.get("max_math_len", 8)
         all_math_ids = torch.tensor(
             [encode_math_features(example.problem, max_math_len) for example in examples],
@@ -215,6 +216,7 @@ def evaluate_preset(
                     batch_math_ids,
                     constrain_to_legal=not args.unconstrained,
                     learned_values=args.learned_values,
+                    raw_learned_values=args.raw_learned_values,
                 )
             )
 
@@ -293,6 +295,7 @@ def evaluate_problem(
         math_ids,
         constrain_to_legal=not args.unconstrained,
         learned_values=args.learned_values,
+        raw_learned_values=args.raw_learned_values,
     )
     pred_trace = traces[0]
     final = trace_final_value(pred_trace)
@@ -307,7 +310,7 @@ def evaluate_problem(
         )
     print(f"final: {final}")
     print(f"trace: {pred_trace}")
-    print(f"target_answer: {eval(expr)}")
+    print(f"target_answer: {safe_eval_expression(expr)}")
     print(f"target_trace: {target_trace}")
     print(f"trace_exact: {pred_trace == target_trace}")
     print(f"trace_equiv: {trace_is_equivalent(expr, pred_trace)}")
@@ -332,6 +335,7 @@ def main() -> None:
     )
     parser.add_argument("--learned", action="store_true")
     parser.add_argument("--learned-values", action="store_true")
+    parser.add_argument("--raw-learned-values", action="store_true")
     parser.add_argument("--unconstrained", action="store_true")
     args = parser.parse_args()
 

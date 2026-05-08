@@ -11,6 +11,7 @@ from .data import (
     class_to_value,
     encode_math_features,
     make_variable_trace_steps,
+    safe_eval_expression,
 )
 from .model import MathJEPAReadout
 from .tokenizer import CharTokenizer, build_math_tokenizer
@@ -64,6 +65,11 @@ def parsed_expression_answer(problem: str) -> str | None:
     expr = extract_expression(problem)
     if expr is None:
         return None
+    if "(" in expr or ")" in expr:
+        try:
+            return str(safe_eval_expression(expr))
+        except ValueError:
+            return None
     parts = re.split(r"([+\-*])", expr)
     if len(parts) < 3 or len(parts) % 2 == 0:
         return None

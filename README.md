@@ -374,6 +374,49 @@ still usually chooses valid reductions:
 | `length_8` | `0.984` | `0.984` |
 | `length_16` | `0.448` | `0.448` |
 
+General structure support has started with safe parenthesized expression parsing. The
+debug solver can now render parenthesized traces through the parser fallback:
+
+```bash
+bash scripts/solve_math.sh --debug-reasoning "What is (3+8)*2?"
+```
+
+Expected trace:
+
+```text
+3+8=11,11*2=22,22
+```
+
+This is not yet a learned parenthesis policy in the variable reasoner. Parentheses are
+handled by the safe parser while the learned dynamic pointer still covers flat `+`, `-`,
+and `*` expressions.
+
+An experimental raw learned value head is also available. It predicts the numeric result
+of each reduction directly from the recurrent latent state plus `lhs/op/rhs`, instead of
+choosing among symbolic candidates:
+
+```bash
+PYTHONPATH=src python -m ssl_reasoner.train \
+  --stages variable_raw_value_head \
+  --checkpoint checkpoints/variable_reasoner/best.pt \
+  --output-dir checkpoints/variable_reasoner_raw_head \
+  --variable-reasoner-steps 1000 \
+  --train-curriculum multi_step_balanced \
+  --val-curriculum multi_step_balanced \
+  --max-math-len 34 \
+  --max-variable-steps 16 \
+  --use-math-features
+
+PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
+  --checkpoint checkpoints/variable_reasoner_raw_head/best.pt \
+  --raw-learned-values \
+  --preset all
+```
+
+Current result: the raw regression loss trains, but exact arithmetic remains near zero.
+The candidate-scored learned-value path is still the working path for exact results. This
+keeps the raw path measurable without pretending it has solved learned arithmetic.
+
 ## Smoke Train
 
 ```bash

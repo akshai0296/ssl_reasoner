@@ -7,7 +7,7 @@ from dataclasses import asdict
 
 import torch
 
-from .data import encode_math_features
+from .data import encode_math_features, extract_math_expression, make_reasoning_text
 from .solver import _device, load_math_solver, solve_problem_texts
 
 
@@ -62,11 +62,18 @@ def solve_variable_debug(
     )
     rows = []
     for problem, trace in zip(problems, traces):
+        try:
+            expr = extract_math_expression(problem)
+        except ValueError:
+            expr = ""
+        is_parenthesized = "(" in expr or ")" in expr
+        if is_parenthesized:
+            trace = make_reasoning_text(expr)
         final = trace_final_value(trace)
         rows.append(
             {
                 "answer": None if final is None else str(final),
-                "mode": "variable_reasoner",
+                "mode": "parsed_expression" if is_parenthesized else "variable_reasoner",
                 "problem": problem,
                 "reasoning_steps": trace_step_dicts(trace),
                 "reasoning_final": final,
