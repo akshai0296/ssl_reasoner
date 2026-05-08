@@ -78,6 +78,16 @@ def trace_final_value(trace: str) -> int | None:
         return None
 
 
+def trace_step_values(trace: str) -> list[list[int]]:
+    values = []
+    for part in [part for part in trace.split(",") if part][:-1]:
+        match = TRACE_STEP_RE.match(part)
+        if match is None:
+            continue
+        values.append([int(match.group(1)), int(match.group(3)), int(match.group(4))])
+    return values
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -119,7 +129,6 @@ def main() -> None:
     learned_final_value_correct = 0
     shown = 0
     learned_traces: list[str] | None = None
-    learned_value_rows: list[list[list[int]]] | None = None
     if args.learned:
         max_math_len = train_args.get("max_math_len", 8)
         all_math_ids = torch.tensor(
@@ -128,7 +137,6 @@ def main() -> None:
             device=device,
         )
         learned_traces = []
-        learned_value_rows = []
         for start in range(0, len(examples), args.batch_size):
             batch_math_ids = all_math_ids[start : start + args.batch_size]
             learned_traces.extend(
@@ -138,15 +146,6 @@ def main() -> None:
                     learned_values=args.learned_values,
                 )
             )
-            if args.learned_values:
-                learned_value_rows.extend(
-                    model.variable_structured_reasoner(batch_math_ids)["values"]
-                    .round()
-                    .to(torch.long)
-                    .detach()
-                    .cpu()
-                    .tolist()
-                )
 
     for idx, (example, result) in enumerate(zip(examples, results)):
         expr = extract_math_expression(example.problem)
@@ -158,10 +157,10 @@ def main() -> None:
         answer_correct += int(answer_ok)
         trace_correct += int(trace_ok)
         trace_equiv_correct += int(trace_equiv_ok)
-        if args.learned_values and learned_value_rows is not None:
+        if args.learned_values:
             _, _, target_values, _, target_mask = make_variable_trace_fields(expr)
             for pred_values, expected_values, is_active in zip(
-                learned_value_rows[idx],
+                trace_step_values(pred_trace),
                 target_values,
                 target_mask,
             ):

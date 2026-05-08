@@ -318,20 +318,18 @@ Current learned baseline result:
 | Metric | Score |
 | --- | ---: |
 | answer exact | `1.000` |
-| learned trace exact | `0.812` |
+| learned trace exact | `1.000` |
 | learned trace equivalent exact | `1.000` |
-| learned step value exact | `0.010` |
-| learned final value exact | `0.000` |
+| learned step value exact | `1.000` |
+| learned final value exact | `1.000` |
 
 The answer remains exact because the solver still uses the parser fallback for final
 answers on longer expressions. The learned recurrent trace head now predicts which
 adjacent operation to reduce next with a dynamic pointer over the currently remaining
-operators, then an exact transition cell executes `+`, `-`, or `*`. It also receives
-legal-position supervision for precedence. The strict trace metric requires the canonical
-target order; the equivalent trace metric replays the predicted reductions and accepts
-valid alternate orders that still reach the same final answer. The `--learned-values`
-eval disables exact arithmetic rendering and uses the model's predicted `lhs/rhs/result`
-triples; this exposes the current transition-value bottleneck.
+operators. The `--learned-values` path now uses a structured transition head: it scores
+the three candidate results `lhs+rhs`, `lhs-rhs`, and `lhs*rhs`, chooses one, and renders
+the resulting `lhs/rhs/result` triples. Legal-position constraints keep inference on the
+canonical precedence and left-to-right schedule.
 
 ## Smoke Train
 

@@ -460,9 +460,9 @@ class VariableStructuredReasoner(nn.Module):
         self.op_head = nn.Linear(d_model, 4)
         self.position_query = nn.Linear(d_model, d_model)
         self.position_key = nn.Linear(d_model + 5, d_model)
-        self.value_head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, d_model),
+        self.result_head = nn.Sequential(
+            nn.LayerNorm(d_model + 5),
+            nn.Linear(d_model + 5, d_model),
             nn.GELU(),
             nn.Linear(d_model, 3),
         )
@@ -528,6 +528,29 @@ class VariableStructuredReasoner(nn.Module):
                         del op_rows[row_idx][target_position]
         return torch.stack(logits, dim=1)
 
+    def result_logits_for_values(
+        self,
+        hidden: torch.Tensor,
+        lhs: torch.Tensor,
+        rhs: torch.Tensor,
+        op_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        op_features = F.one_hot(op_ids.clamp(min=0, max=3), num_classes=4).to(hidden.dtype)
+        value_features = torch.stack(
+            [
+                lhs.to(hidden.dtype) / 1000.0,
+                rhs.to(hidden.dtype) / 1000.0,
+            ],
+            dim=-1,
+        )
+        # Drop the "none" op feature; active transition rows use +, -, or *.
+        features = torch.cat([hidden, value_features, op_features[:, 1:]], dim=-1)
+        return self.result_head(features)
+
+    @staticmethod
+    def arithmetic_candidates(lhs: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
+        return torch.stack([lhs + rhs, lhs - rhs, lhs * rhs], dim=-1)
+
     def forward(self, math_ids: torch.Tensor) -> dict[str, torch.Tensor]:
         hidden = self.encode_initial(math_ids)
 
@@ -542,7 +565,7 @@ class VariableStructuredReasoner(nn.Module):
             "active_logits": self.active_head(step_states).squeeze(-1),
             "op_logits": self.op_head(step_states),
             "position_logits": position_logits,
-            "values": self.value_head(step_states) * VARIABLE_REASONING_SCALE,
+            "states": step_states,
         }
 
     @torch.no_grad()
@@ -584,11 +607,18 @@ class VariableStructuredReasoner(nn.Module):
             reduction="none",
         ).mean(dim=-1)
         legal_loss = (legal_loss * step_mask).sum() / step_mask.sum().clamp(min=1.0)
-        value_loss = F.smooth_l1_loss(
-            out["values"] / VARIABLE_REASONING_SCALE,
-            value_targets / VARIABLE_REASONING_SCALE,
+        result_logits = self.result_logits_for_values(
+            out["states"].reshape(-1, out["states"].size(-1)),
+            value_targets[:, :, 0].reshape(-1),
+            value_targets[:, :, 1].reshape(-1),
+            op_targets.reshape(-1),
+        ).view(math_ids.size(0), self.max_steps, 3)
+        candidate_targets = (op_targets - 1).clamp(min=0, max=2)
+        value_loss = F.cross_entropy(
+            result_logits.reshape(-1, 3),
+            candidate_targets.reshape(-1),
             reduction="none",
-        ).mean(dim=-1)
+        ).view_as(step_mask)
         value_loss = (value_loss * step_mask).sum() / step_mask.sum().clamp(min=1.0)
         active_pred = out["active_logits"].sigmoid().ge(0.5).float()
         active_acc = (active_pred == step_mask).float().mean()
@@ -602,11 +632,22 @@ class VariableStructuredReasoner(nn.Module):
         legal_acc = (
             (legal_pred == legal_position_targets).float().mean(dim=-1) * step_mask
         ).sum() / step_mask.sum().clamp(min=1.0)
+        candidate_values = self.arithmetic_candidates(
+            value_targets[:, :, 0],
+            value_targets[:, :, 1],
+        )
         value_acc = (
-            (out["values"].round() == value_targets).float().mean(dim=-1) * step_mask
+            (
+                candidate_values.gather(
+                    dim=-1,
+                    index=result_logits.argmax(dim=-1, keepdim=True),
+                ).squeeze(-1)
+                == value_targets[:, :, 2].round()
+            ).float()
+            * step_mask
         ).sum() / step_mask.sum().clamp(min=1.0)
         return {
-            "loss": active_loss + op_loss + position_loss + legal_loss + 0.05 * value_loss,
+            "loss": active_loss + op_loss + position_loss + legal_loss + value_loss,
             "variable_active_loss": active_loss,
             "variable_op_loss": op_loss,
             "variable_position_loss": position_loss,
@@ -1914,16 +1955,6 @@ class MathJEPAReadout(nn.Module):
     ) -> list[str]:
         math_rows = math_ids.detach().cpu().tolist()
         hidden_rows = self.variable_structured_reasoner.initial_hidden(math_ids)
-        learned_value_rows = None
-        if learned_values:
-            learned_value_rows = (
-                self.variable_structured_reasoner(math_ids)["values"]
-                .round()
-                .to(torch.long)
-                .detach()
-                .cpu()
-                .tolist()
-            )
         traces = []
         for row_idx, math_row in enumerate(math_rows):
             values = [
@@ -1956,7 +1987,15 @@ class MathJEPAReadout(nn.Module):
                     current_op_ids,
                     math_ids.device,
                 )[0].detach().cpu().tolist()
-                position = max(range(len(step_logits)), key=lambda idx: step_logits[idx])
+                if constrain_to_legal:
+                    legal_positions = (
+                        [idx for idx, current_op in enumerate(ops) if current_op == 3]
+                        if 3 in ops
+                        else [0]
+                    )
+                    position = max(legal_positions, key=lambda idx: step_logits[idx])
+                else:
+                    position = max(range(len(step_logits)), key=lambda idx: step_logits[idx])
                 lhs = values[position]
                 rhs = values[position + 1]
                 op_id = ops[position]
@@ -1968,8 +2007,25 @@ class MathJEPAReadout(nn.Module):
                     result = lhs * rhs
                 else:
                     break
-                if learned_value_rows is not None:
-                    lhs, rhs, result = learned_value_rows[row_idx][step_idx]
+                if learned_values:
+                    lhs_tensor = torch.tensor([lhs], device=math_ids.device)
+                    rhs_tensor = torch.tensor([rhs], device=math_ids.device)
+                    result_logits = self.variable_structured_reasoner.result_logits_for_values(
+                        hidden,
+                        lhs_tensor,
+                        rhs_tensor,
+                        torch.tensor([op_id], device=math_ids.device),
+                    )
+                    candidates = self.variable_structured_reasoner.arithmetic_candidates(
+                        lhs_tensor,
+                        rhs_tensor,
+                    )
+                    result = int(
+                        candidates.gather(
+                            dim=-1,
+                            index=result_logits.argmax(dim=-1, keepdim=True),
+                        )[0, 0].item()
+                    )
                 op = self._trace_op_to_text(op_id)
                 parts.append(f"{lhs}{op}{rhs}={result}")
                 final = result
