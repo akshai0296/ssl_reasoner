@@ -116,6 +116,7 @@ def main() -> None:
         use_math_features=train_args.get("use_math_features", False),
         math_vocab_size=MATH_FEATURE_VOCAB_SIZE,
         max_math_len=train_args.get("max_math_len", 8),
+        max_variable_steps=train_args.get("max_variable_steps", 4),
         use_reasoning_trace=train_args.get("use_reasoning_trace", False),
         max_trace_len=train_args.get("max_trace_len", 32),
         use_trace_fusion=train_args.get("use_trace_fusion", False),

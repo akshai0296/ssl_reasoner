@@ -346,9 +346,19 @@ distribution-bound:
 | `no_multiply` | `1.000` | `1.000` | `1.000` |
 | `many_multiply` | `1.000` | `1.000` | `1.000` |
 
-The variable reasoner now trains with a balanced multi-step curriculum and a 10-token
+The variable reasoner now trains with a balanced multi-step curriculum and a 34-token
 math feature window, covering standard, larger-number, longer, no-multiply, and
 many-multiply expressions. Checkpoint selection uses unconstrained trace-equivalence.
+
+The dynamic-length Phase 1 path raises the variable reasoner to a 34-token math feature
+window and up to 16 reduction steps. Length generalization currently measures as:
+
+| Preset | Trace exact | Learned step value exact | Learned final value exact |
+| --- | ---: | ---: | ---: |
+| `length_3` | `1.000` | `1.000` | `1.000` |
+| `length_5` | `1.000` | `1.000` | `1.000` |
+| `length_8` | `0.988` | `0.998` | `0.988` |
+| `length_16` | `0.750` | `0.917` | `0.750` |
 
 Without legal/canonical inference constraints, the learned pointer policy is weaker but
 still usually chooses valid reductions:
@@ -356,10 +366,13 @@ still usually chooses valid reductions:
 | Preset | Unconstrained trace equivalent exact | Unconstrained final value exact |
 | --- | ---: | ---: |
 | `in_dist` | `1.000` | `1.000` |
-| `larger_numbers` | `0.980` | `0.980` |
+| `larger_numbers` | `1.000` | `1.000` |
 | `longer_expr` | `1.000` | `1.000` |
-| `no_multiply` | `0.976` | `0.976` |
+| `no_multiply` | `0.996` | `0.996` |
 | `many_multiply` | `1.000` | `1.000` |
+| `length_5` | `1.000` | `1.000` |
+| `length_8` | `0.984` | `0.984` |
+| `length_16` | `0.448` | `0.448` |
 
 ## Smoke Train
 

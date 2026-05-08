@@ -816,6 +816,7 @@ def main() -> None:
     parser.add_argument("--max-problem-len", type=int, default=64)
     parser.add_argument("--max-answer-len", type=int, default=16)
     parser.add_argument("--max-math-len", type=int, default=8)
+    parser.add_argument("--max-variable-steps", type=int, default=4)
     parser.add_argument("--max-trace-len", type=int, default=32)
     parser.add_argument("--use-math-features", action="store_true")
     parser.add_argument("--use-reasoning-trace", action="store_true")
@@ -894,6 +895,9 @@ def main() -> None:
         args.max_problem_len = ckpt_args.get("max_problem_len", args.max_problem_len)
         args.max_answer_len = ckpt_args.get("max_answer_len", args.max_answer_len)
         args.max_math_len = ckpt_args.get("max_math_len", args.max_math_len)
+        args.max_variable_steps = ckpt_args.get(
+            "max_variable_steps", args.max_variable_steps
+        )
         args.max_trace_len = ckpt_args.get("max_trace_len", args.max_trace_len)
         args.d_model = ckpt_args.get("d_model", args.d_model)
         args.num_slots = ckpt_args.get("num_slots", args.num_slots)
@@ -932,6 +936,7 @@ def main() -> None:
         args.max_answer_len,
         args.max_math_len,
         args.max_trace_len,
+        args.max_variable_steps,
     )
     val_dataset = MathDataset(
         val_examples,
@@ -940,6 +945,7 @@ def main() -> None:
         args.max_answer_len,
         args.max_math_len,
         args.max_trace_len,
+        args.max_variable_steps,
     )
     loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
 
@@ -957,6 +963,7 @@ def main() -> None:
         use_math_features=args.use_math_features,
         math_vocab_size=MATH_FEATURE_VOCAB_SIZE,
         max_math_len=args.max_math_len,
+        max_variable_steps=args.max_variable_steps,
         use_reasoning_trace=args.use_reasoning_trace,
         max_trace_len=args.max_trace_len,
         use_trace_fusion=args.use_trace_fusion,

@@ -50,6 +50,7 @@ def load_reasoner(checkpoint_path: str, device: torch.device) -> tuple[MathJEPAR
         use_math_features=args.get("use_math_features", False),
         math_vocab_size=MATH_FEATURE_VOCAB_SIZE,
         max_math_len=args.get("max_math_len", 8),
+        max_variable_steps=args.get("max_variable_steps", 4),
         use_reasoning_trace=args.get("use_reasoning_trace", False),
         max_trace_len=args.get("max_trace_len", 32),
         use_trace_fusion=args.get("use_trace_fusion", False),

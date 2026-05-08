@@ -303,6 +303,30 @@ def _make_expression(
     return expr, eval(expr), "mixed"
 
 
+def _make_multi_step_expression(
+    rng: random.Random,
+    *,
+    num_ops: int,
+    first_bounds: tuple[int, int] = (0, 50),
+    other_bounds: tuple[int, int] = (0, 20),
+    op_choices: tuple[str, ...] = ("+", "-", "*"),
+    require_multiply: bool = True,
+    min_multiply_count: int = 0,
+) -> tuple[str, int, str]:
+    operands = [_rand_operand(rng, first_bounds)]
+    operands.extend(_rand_operand(rng, other_bounds) for _ in range(num_ops))
+    expr_ops = [rng.choice(list(op_choices)) for _ in range(num_ops)]
+    if require_multiply and "*" in op_choices and "*" not in expr_ops:
+        expr_ops[rng.randrange(len(expr_ops))] = "*"
+    if "*" in op_choices and min_multiply_count > 0:
+        for op_idx in rng.sample(range(num_ops), k=min(min_multiply_count, num_ops)):
+            expr_ops[op_idx] = "*"
+    expr = "".join(
+        f"{value}{op_text}" for value, op_text in zip(operands, expr_ops)
+    ) + str(operands[-1])
+    return expr, eval(expr), "multi_step"
+
+
 COMPOSITIONAL_CURRICULA = {
     "seen_single",
     "unseen_single",
@@ -382,57 +406,50 @@ def generate_math_examples(
         elif curriculum == "multi_step_balanced":
             difficulty = 2
             op = None
-            variant = idx % 6
+            variant = idx % 10
             if variant == 0:
                 expr, value, op_label = _make_expression(
                     rng, difficulty, op=op, **expression_kwargs
                 )
                 split_label = "multi_step"
             elif variant == 1:
-                operands = [_rand_operand(rng, (0, 50))]
-                operands.extend(_rand_operand(rng, (0, 20)) for _ in range(4))
-                expr_ops = [rng.choice(["+", "-", "*"]) for _ in range(4)]
-                if "*" not in expr_ops:
-                    expr_ops[rng.randrange(len(expr_ops))] = "*"
-                expr = "".join(
-                    f"{value}{op_text}" for value, op_text in zip(operands, expr_ops)
-                ) + str(operands[-1])
-                value = eval(expr)
-                op_label = "multi_step"
+                expr, value, op_label = _make_multi_step_expression(
+                    rng,
+                    num_ops=4,
+                )
                 split_label = "longer_expr"
             elif variant == 2:
-                operands = [_rand_operand(rng, (51, 120))]
-                operands.extend(_rand_operand(rng, (21, 60)) for _ in range(3))
-                expr_ops = [rng.choice(["+", "-", "*"]) for _ in range(3)]
-                if "*" not in expr_ops:
-                    expr_ops[rng.randrange(len(expr_ops))] = "*"
-                expr = "".join(
-                    f"{value}{op_text}" for value, op_text in zip(operands, expr_ops)
-                ) + str(operands[-1])
-                value = eval(expr)
-                op_label = "multi_step"
+                expr, value, op_label = _make_multi_step_expression(
+                    rng,
+                    num_ops=3,
+                    first_bounds=(51, 120),
+                    other_bounds=(21, 60),
+                )
                 split_label = "larger_numbers"
             elif variant in {3, 5}:
-                operands = [_rand_operand(rng, (0, 50))]
-                operands.extend(_rand_operand(rng, (0, 20)) for _ in range(3))
-                expr_ops = [rng.choice(["+", "-"]) for _ in range(3)]
-                expr = "".join(
-                    f"{value}{op_text}" for value, op_text in zip(operands, expr_ops)
-                ) + str(operands[-1])
-                value = eval(expr)
-                op_label = "multi_step"
+                expr, value, op_label = _make_multi_step_expression(
+                    rng,
+                    num_ops=3,
+                    op_choices=("+", "-"),
+                    require_multiply=False,
+                )
                 split_label = "no_multiply"
-            else:
-                operands = [_rand_operand(rng, (0, 20)) for _ in range(4)]
-                expr_ops = [rng.choice(["+", "-", "*"]) for _ in range(3)]
-                for op_idx in rng.sample(range(3), k=2):
-                    expr_ops[op_idx] = "*"
-                expr = "".join(
-                    f"{value}{op_text}" for value, op_text in zip(operands, expr_ops)
-                ) + str(operands[-1])
-                value = eval(expr)
-                op_label = "multi_step"
+            elif variant == 4:
+                expr, value, op_label = _make_multi_step_expression(
+                    rng,
+                    num_ops=3,
+                    first_bounds=(0, 20),
+                    other_bounds=(0, 20),
+                    min_multiply_count=2,
+                )
                 split_label = "many_multiply"
+            else:
+                num_ops = {6: 5, 7: 8, 8: 12, 9: 16}[variant]
+                expr, value, op_label = _make_multi_step_expression(
+                    rng,
+                    num_ops=num_ops,
+                )
+                split_label = f"length_{num_ops}"
         elif curriculum in COMPOSITIONAL_CURRICULA:
             difficulty, op, split_label, expression_kwargs = _compositional_spec(
                 curriculum, idx
@@ -472,6 +489,7 @@ class MathDataset(Dataset):
         max_answer_len: int = 16,
         max_math_len: int = 8,
         max_trace_len: int = 32,
+        max_variable_steps: int = 4,
     ):
         self.examples = examples
         self.tokenizer = tokenizer
@@ -479,6 +497,7 @@ class MathDataset(Dataset):
         self.max_answer_len = max_answer_len
         self.max_math_len = max_math_len
         self.max_trace_len = max_trace_len
+        self.max_variable_steps = max_variable_steps
 
     def __len__(self) -> int:
         return len(self.examples)
@@ -501,7 +520,7 @@ class MathDataset(Dataset):
             variable_trace_legal_mask,
             variable_trace_mask,
         ) = (
-            make_variable_trace_fields(expr)
+            make_variable_trace_fields(expr, max_steps=self.max_variable_steps)
         )
         reasoning_step_ids = [
             self.tokenizer.encode(text, self.max_answer_len)

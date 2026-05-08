@@ -13,7 +13,7 @@ VALUE_CONDITIONED_MAX = 1200
 VALUE_CONDITIONED_CLASSES = VALUE_CONDITIONED_MAX - VALUE_CONDITIONED_MIN + 1
 TRACE_STATE_SCALE = 100.0
 VARIABLE_REASONING_SCALE = 100.0
-MAX_VARIABLE_REASONING_STEPS = 4
+MAX_VARIABLE_REASONING_STEPS = 16
 MATH_FEATURE_NUM_OFFSET = 1
 MATH_FEATURE_PLUS_ID = 202
 MATH_FEATURE_MINUS_ID = 203
@@ -763,6 +763,7 @@ class MathJEPAReadout(nn.Module):
         use_math_features: bool = False,
         math_vocab_size: int = 205,
         max_math_len: int = 8,
+        max_variable_steps: int = MAX_VARIABLE_REASONING_STEPS,
         use_reasoning_trace: bool = False,
         max_trace_len: int = 32,
         use_trace_fusion: bool = False,
@@ -783,7 +784,7 @@ class MathJEPAReadout(nn.Module):
             math_vocab_size, d_model, max_math_len
         )
         self.variable_structured_reasoner = VariableStructuredReasoner(
-            math_vocab_size, d_model, max_math_len
+            math_vocab_size, d_model, max_math_len, max_steps=max_variable_steps
         )
         self.state_conditioned_projector = StateConditionedSlotProjector(
             d_model, num_slots

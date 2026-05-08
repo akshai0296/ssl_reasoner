@@ -8,7 +8,8 @@ PYTHONUNBUFFERED=1 PYTHONPATH=src python -m ssl_reasoner.train \
   --val-size "${VAL_SIZE:-600}" \
   --train-curriculum "${TRAIN_CURRICULUM:-multi_step_balanced}" \
   --val-curriculum "${VAL_CURRICULUM:-multi_step_balanced}" \
-  --max-math-len "${MAX_MATH_LEN:-10}" \
+  --max-math-len "${MAX_MATH_LEN:-34}" \
+  --max-variable-steps "${MAX_VARIABLE_STEPS:-16}" \
   --batch-size "${BATCH_SIZE:-64}" \
   --lr "${LR:-0.001}" \
   --use-math-features \

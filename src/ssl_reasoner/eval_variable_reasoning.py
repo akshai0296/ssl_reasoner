@@ -25,6 +25,10 @@ EVAL_PRESETS = (
     "longer_expr",
     "no_multiply",
     "many_multiply",
+    "length_3",
+    "length_5",
+    "length_8",
+    "length_16",
 )
 
 
@@ -164,6 +168,13 @@ def generate_ood_examples(samples: int, seed: int, preset: str) -> list[MathExam
             multiply_positions = rng.sample(range(3), k=2)
             for idx in multiply_positions:
                 ops[idx] = "*"
+        elif preset.startswith("length_"):
+            num_ops = int(preset.split("_", maxsplit=1)[1])
+            operands = [rng.randint(0, 50)]
+            operands.extend(rng.randint(0, 20) for _ in range(num_ops))
+            ops = [rng.choice(["+", "-", "*"]) for _ in range(num_ops)]
+            if "*" not in ops:
+                ops[rng.randrange(len(ops))] = "*"
         expr = "".join(f"{value}{op}" for value, op in zip(operands, ops)) + str(
             operands[-1]
         )
@@ -219,7 +230,10 @@ def evaluate_preset(
         trace_correct += int(trace_ok)
         trace_equiv_correct += int(trace_equiv_ok)
         if args.learned_values:
-            _, _, target_values, _, target_mask = make_variable_trace_fields(expr)
+            _, _, target_values, _, target_mask = make_variable_trace_fields(
+                expr,
+                max_steps=train_args.get("max_variable_steps", 4),
+            )
             for pred_values, expected_values, is_active in zip(
                 trace_step_values(pred_trace),
                 target_values,
