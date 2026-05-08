@@ -317,13 +317,15 @@ Current learned baseline result:
 | --- | ---: |
 | answer exact | `1.000` |
 | learned trace exact | `0.812` |
+| learned trace equivalent exact | `1.000` |
 
 The answer remains exact because the solver still uses the parser fallback for final
 answers on longer expressions. The learned recurrent trace head now predicts which
 adjacent operation to reduce next with a dynamic pointer over the currently remaining
 operators, then an exact transition cell executes `+`, `-`, or `*`. It also receives
-legal-position supervision for precedence. The remaining trace misses are mostly valid
-alternative reduction orders that still reach the same final answer.
+legal-position supervision for precedence. The strict trace metric requires the canonical
+target order; the equivalent trace metric replays the predicted reductions and accepts
+valid alternate orders that still reach the same final answer.
 
 ## Smoke Train
 
