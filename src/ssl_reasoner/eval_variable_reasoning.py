@@ -245,6 +245,34 @@ def evaluate_preset(
         )
 
 
+def evaluate_problem(
+    args: argparse.Namespace,
+    model,
+    train_args: dict,
+    device: torch.device,
+) -> None:
+    expr = extract_math_expression(args.problem)
+    max_math_len = train_args.get("max_math_len", 8)
+    math_ids = torch.tensor(
+        [encode_math_features(args.problem, max_math_len)],
+        dtype=torch.long,
+        device=device,
+    )
+    traces = model.solve_variable_reasoning_texts(
+        math_ids,
+        constrain_to_legal=not args.unconstrained,
+        learned_values=args.learned_values,
+    )
+    pred_trace = traces[0]
+    print(f"problem: {args.problem}")
+    print(f"target_answer: {eval(expr)}")
+    print(f"pred_answer: {trace_final_value(pred_trace)}")
+    print(f"trace: {pred_trace}")
+    print(f"target_trace: {make_reasoning_text(expr)}")
+    print(f"trace_exact: {pred_trace == make_reasoning_text(expr)}")
+    print(f"trace_equiv: {trace_is_equivalent(expr, pred_trace)}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -256,6 +284,7 @@ def main() -> None:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--dump-errors", type=int, default=10)
+    parser.add_argument("--problem")
     parser.add_argument(
         "--preset",
         choices=EVAL_PRESETS + ("all",),
@@ -268,6 +297,9 @@ def main() -> None:
 
     device = _device(args.device)
     model, tokenizer, train_args = load_math_solver(args.checkpoint, device)
+    if args.problem:
+        evaluate_problem(args, model, train_args, device)
+        return
     presets = EVAL_PRESETS if args.preset == "all" else (args.preset,)
     for idx, preset in enumerate(presets):
         if idx:
