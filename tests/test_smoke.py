@@ -705,8 +705,12 @@ def test_standalone_transition_forward():
     op_ids = torch.tensor([1, 3, 2])
     rhs = torch.tensor([8.0, 2.0, 7.0])
     logits = model.standalone_transition(lhs, op_ids, rhs)
+    digit_pred = model.standalone_transition.predict_value(lhs, op_ids, rhs, mode="digit")
+    hybrid_pred = model.standalone_transition.predict_value(lhs, op_ids, rhs, mode="hybrid")
 
     assert logits.shape[0] == 3
+    assert digit_pred.shape == (3,)
+    assert hybrid_pred.shape == (3,)
 
 
 def test_latent_verifier_forward():

@@ -452,6 +452,16 @@ PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
   --checkpoint checkpoints/standalone_transition_reductions/best.pt \
   --standalone-learned-values \
   --preset all
+
+PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
+  --checkpoint checkpoints/standalone_transition_hybrid/best.pt \
+  --standalone-digit-values \
+  --preset all
+
+PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
+  --checkpoint checkpoints/standalone_transition_hybrid/best.pt \
+  --standalone-hybrid-values \
+  --preset all
 ```
 
 Measured single-step answer exact on 500 generated `single_op_balanced` examples:
@@ -505,6 +515,21 @@ Single-step retention after reduction training is `0.914` overall:
 The reduction-trained standalone transition is now useful, but it still fails on larger
 numbers and long chains. The next improvement should expand the value representation
 beyond the bounded class range or add a digit/residual fallback for out-of-range states.
+
+The first out-of-range experiment adds a 10-digit standalone decoder and a hybrid
+class-or-digit inference mode. It trains, but digit inference is still weaker than the
+bounded class path, so class mode remains the best current setting:
+
+| Checkpoint / mode | In-dist | Larger numbers | Length 8 | Length 16 |
+| --- | ---: | ---: | ---: | ---: |
+| `standalone_transition_reductions`, class, 200 samples | `0.650` | `0.000` | `0.320` | `0.080` |
+| `standalone_transition_hybrid`, class, 200 samples | `0.740` | `0.010` | `0.370` | `0.100` |
+| `standalone_transition_hybrid`, hybrid, 200 samples | `0.695` | `0.000` | `0.330` | `0.095` |
+| `standalone_transition_hybrid`, digit, 200 samples | `0.165` | `0.000` | `0.035` | `0.015` |
+
+On 500 in-dist samples, `standalone_transition_hybrid` in class mode reaches `0.764`.
+This shows the extra reduction training helped, but the digit fallback is not yet the
+right larger-number solution.
 
 ## Smoke Train
 

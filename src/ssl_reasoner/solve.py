@@ -64,6 +64,8 @@ def solve_variable_debug(
         digit_learned_values=value_mode == "digit",
         class_learned_values=value_mode == "class",
         standalone_learned_values=value_mode == "standalone",
+        standalone_digit_values=value_mode == "standalone_digit",
+        standalone_hybrid_values=value_mode == "standalone_hybrid",
     )
     rows = []
     for problem, trace in zip(problems, traces):
@@ -103,7 +105,15 @@ def main() -> None:
     parser.add_argument("--unconstrained", action="store_true")
     parser.add_argument(
         "--value-mode",
-        choices=["candidate", "raw", "digit", "class", "standalone"],
+        choices=[
+            "candidate",
+            "raw",
+            "digit",
+            "class",
+            "standalone",
+            "standalone_digit",
+            "standalone_hybrid",
+        ],
         default="candidate",
     )
     parser.add_argument("problems", nargs="+")

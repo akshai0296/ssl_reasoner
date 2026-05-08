@@ -19,6 +19,7 @@ TRANSITION_DIGITS = 5
 TRANSITION_VALUE_MIN = -1000
 TRANSITION_VALUE_MAX = 10000
 TRANSITION_VALUE_CLASSES = TRANSITION_VALUE_MAX - TRANSITION_VALUE_MIN + 1
+STANDALONE_TRANSITION_DIGITS = 10
 MATH_FEATURE_NUM_OFFSET = 1
 MATH_FEATURE_PLUS_ID = 202
 MATH_FEATURE_MINUS_ID = 203
@@ -48,6 +49,14 @@ class StandaloneArithmeticTransition(nn.Module):
             nn.Linear(d_model * 4, d_model * 2),
             nn.GELU(),
             nn.Linear(d_model * 2, TRANSITION_VALUE_CLASSES),
+        )
+        self.digit_head = nn.Sequential(
+            nn.LayerNorm(d_model * 3),
+            nn.Linear(d_model * 3, d_model * 4),
+            nn.GELU(),
+            nn.Linear(d_model * 4, d_model * 2),
+            nn.GELU(),
+            nn.Linear(d_model * 2, 2 + STANDALONE_TRANSITION_DIGITS * 10),
         )
 
     @staticmethod
@@ -83,10 +92,58 @@ class StandaloneArithmeticTransition(nn.Module):
         op_ids: torch.Tensor,
         rhs: torch.Tensor,
     ) -> torch.Tensor:
+        return self.class_logits(lhs, op_ids, rhs)
+
+    def encode_transition(
+        self,
+        lhs: torch.Tensor,
+        op_ids: torch.Tensor,
+        rhs: torch.Tensor,
+    ) -> torch.Tensor:
         lhs_h = self.lhs_proj(self._value_representation(lhs))
         rhs_h = self.rhs_proj(self._value_representation(rhs))
         op_h = self.op_embed(op_ids.clamp(min=0, max=3).long())
-        return self.net(torch.cat([lhs_h, op_h, rhs_h], dim=-1))
+        return torch.cat([lhs_h, op_h, rhs_h], dim=-1)
+
+    def class_logits(
+        self,
+        lhs: torch.Tensor,
+        op_ids: torch.Tensor,
+        rhs: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.net(self.encode_transition(lhs, op_ids, rhs))
+
+    @staticmethod
+    def value_to_sign_digits(values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        rounded = values.round().long()
+        sign = rounded.lt(0).long()
+        magnitude = rounded.abs().clamp(max=(10 ** STANDALONE_TRANSITION_DIGITS) - 1)
+        digits = []
+        for place in reversed(range(STANDALONE_TRANSITION_DIGITS)):
+            divisor = 10 ** place
+            digits.append((magnitude // divisor) % 10)
+        return sign, torch.stack(digits, dim=-1)
+
+    @staticmethod
+    def sign_digits_to_value(sign_ids: torch.Tensor, digit_ids: torch.Tensor) -> torch.Tensor:
+        multipliers = torch.tensor(
+            [10 ** place for place in reversed(range(STANDALONE_TRANSITION_DIGITS))],
+            device=digit_ids.device,
+            dtype=torch.long,
+        )
+        magnitude = (digit_ids.long() * multipliers).sum(dim=-1)
+        return torch.where(sign_ids.long().eq(1), -magnitude, magnitude)
+
+    def digit_logits(
+        self,
+        lhs: torch.Tensor,
+        op_ids: torch.Tensor,
+        rhs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        logits = self.digit_head(self.encode_transition(lhs, op_ids, rhs))
+        sign_logits = logits[:, :2]
+        digit_logits = logits[:, 2:].view(-1, STANDALONE_TRANSITION_DIGITS, 10)
+        return sign_logits, digit_logits
 
     def loss(
         self,
@@ -108,11 +165,44 @@ class StandaloneArithmeticTransition(nn.Module):
             (pred == flat_result.round().long()).float() * flat_mask
         ).sum() / flat_mask.sum().clamp(min=1.0)
         coverage = flat_mask.sum() / mask.reshape(-1).sum().clamp(min=1.0)
+        sign_logits, digit_logits = self.digit_logits(
+            lhs.reshape(-1),
+            op_ids.reshape(-1),
+            rhs.reshape(-1),
+        )
+        sign_targets, digit_targets = self.value_to_sign_digits(flat_result)
+        active_mask = mask.reshape(-1)
+        digit_sign_loss = F.cross_entropy(
+            sign_logits,
+            sign_targets,
+            reduction="none",
+        )
+        digit_sign_loss = (
+            digit_sign_loss * active_mask
+        ).sum() / active_mask.sum().clamp(min=1.0)
+        digit_value_loss = F.cross_entropy(
+            digit_logits.reshape(-1, 10),
+            digit_targets.reshape(-1),
+            reduction="none",
+        ).view(-1, STANDALONE_TRANSITION_DIGITS)
+        digit_value_loss = (
+            digit_value_loss.mean(dim=-1) * active_mask
+        ).sum() / active_mask.sum().clamp(min=1.0)
+        digit_pred = self.sign_digits_to_value(
+            sign_logits.argmax(dim=-1),
+            digit_logits.argmax(dim=-1),
+        )
+        digit_acc = (
+            (digit_pred == flat_result.round().long()).float() * active_mask
+        ).sum() / active_mask.sum().clamp(min=1.0)
         return {
-            "loss": loss,
+            "loss": loss + digit_sign_loss + digit_value_loss,
             "standalone_transition_loss": loss,
             "standalone_transition_acc": acc,
             "standalone_transition_coverage": coverage,
+            "standalone_transition_digit_sign_loss": digit_sign_loss,
+            "standalone_transition_digit_value_loss": digit_value_loss,
+            "standalone_transition_digit_acc": digit_acc,
         }
 
     @torch.no_grad()
@@ -121,8 +211,26 @@ class StandaloneArithmeticTransition(nn.Module):
         lhs: torch.Tensor,
         op_ids: torch.Tensor,
         rhs: torch.Tensor,
+        mode: str = "class",
     ) -> torch.Tensor:
-        return self.class_to_value(self(lhs, op_ids, rhs).argmax(dim=-1))
+        class_logits = self(lhs, op_ids, rhs)
+        class_pred = self.class_to_value(class_logits.argmax(dim=-1))
+        if mode == "class":
+            return class_pred
+        sign_logits, digit_logits = self.digit_logits(lhs, op_ids, rhs)
+        digit_pred = self.sign_digits_to_value(
+            sign_logits.argmax(dim=-1),
+            digit_logits.argmax(dim=-1),
+        )
+        if mode == "digit":
+            return digit_pred
+        if mode != "hybrid":
+            raise ValueError(f"Unknown standalone transition mode: {mode}")
+        class_probs = class_logits.softmax(dim=-1)
+        class_conf = class_probs.max(dim=-1).values
+        at_boundary = class_pred.eq(TRANSITION_VALUE_MIN) | class_pred.eq(TRANSITION_VALUE_MAX)
+        use_digit = at_boundary | class_conf.lt(0.75)
+        return torch.where(use_digit, digit_pred, class_pred)
 
 
 class MeanPoolEncoder(nn.Module):
@@ -2300,6 +2408,8 @@ class MathJEPAReadout(nn.Module):
         digit_learned_values: bool = False,
         class_learned_values: bool = False,
         standalone_learned_values: bool = False,
+        standalone_digit_values: bool = False,
+        standalone_hybrid_values: bool = False,
     ) -> list[str]:
         math_rows = math_ids.detach().cpu().tolist()
         hidden_rows = self.variable_structured_reasoner.initial_hidden(math_ids)
@@ -2355,13 +2465,20 @@ class MathJEPAReadout(nn.Module):
                     result = lhs * rhs
                 else:
                     break
-                if standalone_learned_values:
+                if standalone_learned_values or standalone_digit_values or standalone_hybrid_values:
                     lhs_tensor = torch.tensor([lhs], device=math_ids.device)
                     rhs_tensor = torch.tensor([rhs], device=math_ids.device)
                     standalone_result = self.standalone_transition.predict_value(
                         lhs_tensor,
                         torch.tensor([op_id], device=math_ids.device),
                         rhs_tensor,
+                        mode=(
+                            "digit"
+                            if standalone_digit_values
+                            else "hybrid"
+                            if standalone_hybrid_values
+                            else "class"
+                        ),
                     )
                     result = int(standalone_result[0].item())
                 elif class_learned_values:

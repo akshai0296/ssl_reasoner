@@ -119,7 +119,9 @@ def evaluate_with_breakdown(
 
 
 @torch.no_grad()
-def evaluate_standalone_transition(model, dataset, device, batch_size: int) -> float:
+def evaluate_standalone_transition(
+    model, dataset, device, batch_size: int, mode: str = "hybrid"
+) -> float:
     model.eval()
     loader = DataLoader(dataset, batch_size=batch_size)
     correct = 0.0
@@ -135,6 +137,7 @@ def evaluate_standalone_transition(model, dataset, device, batch_size: int) -> f
             values[:, :, 0].reshape(-1),
             op_ids.reshape(-1),
             values[:, :, 1].reshape(-1),
+            mode=mode,
         ).view_as(mask)
         correct += float(((pred == target).float() * eval_mask).sum().item())
         total += float(eval_mask.sum().item())
@@ -735,6 +738,7 @@ def run_stage(
                         "variable_class_value_acc",
                         "standalone_transition_acc",
                         "standalone_transition_coverage",
+                        "standalone_transition_digit_acc",
                     }
                 )
                 print(

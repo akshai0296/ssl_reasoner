@@ -3,7 +3,7 @@ set -euo pipefail
 
 PYTHONUNBUFFERED=1 PYTHONPATH=src python -m ssl_reasoner.train \
   --stages standalone_transition \
-  --checkpoint "${CHECKPOINT:-checkpoints/standalone_transition_single/best.pt}" \
+  --checkpoint "${CHECKPOINT:-checkpoints/standalone_transition_reductions/best.pt}" \
   --variable-reasoner-steps "${STEPS:-5000}" \
   --train-size "${TRAIN_SIZE:-60000}" \
   --val-size "${VAL_SIZE:-3000}" \
