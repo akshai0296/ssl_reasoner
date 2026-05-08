@@ -285,6 +285,40 @@ def test_step_state_head_forward_and_loss():
     assert out["step_state_final_acc"].ndim == 0
 
 
+def test_state_conditioned_latent_forward_and_decode():
+    tokenizer = build_math_tokenizer()
+    dataset = MathDataset(generate_math_examples(4, seed=4), tokenizer)
+    batch = [dataset[i] for i in range(4)]
+    problem_ids = torch.stack([item["problem_ids"] for item in batch])
+    answer_ids = torch.stack([item["answer_ids"] for item in batch])
+    math_ids = torch.stack([item["math_ids"] for item in batch])
+    answer_value_id = torch.stack([item["answer_value_id"] for item in batch])
+
+    model = MathJEPAReadout(
+        vocab_size=tokenizer.vocab_size,
+        predictor_type="cross_attn",
+        use_math_features=True,
+        use_reasoning_trace=True,
+    )
+    slots = model.predict_state_conditioned_slots(problem_ids, math_ids)
+    out = model.state_conditioned_latent_loss(
+        problem_ids,
+        math_ids,
+        answer_ids,
+        answer_value_id=answer_value_id,
+    )
+    decoded = model.solve_ids_from_state_conditioned(
+        problem_ids,
+        math_ids,
+        pad_id=tokenizer.pad_id,
+    )
+
+    assert slots.shape == (4, 8, 128)
+    assert out["loss"].ndim == 0
+    assert out["state_conditioned_pred_loss"].ndim == 0
+    assert len(decoded) == 4
+
+
 def test_cross_attention_with_math_features_forward():
     tokenizer = build_math_tokenizer()
     dataset = MathDataset(generate_math_examples(4), tokenizer)

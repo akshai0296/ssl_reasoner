@@ -26,6 +26,16 @@ from .tokenizer import build_math_tokenizer
 from .verifier import model_candidate_texts, operation_candidate_text
 
 
+def _load_matching_state_dict(model: torch.nn.Module, state_dict: dict[str, torch.Tensor]) -> None:
+    current = model.state_dict()
+    matched = {
+        key: value
+        for key, value in state_dict.items()
+        if key in current and current[key].shape == value.shape
+    }
+    model.load_state_dict(matched, strict=False)
+
+
 def _device(name: str) -> torch.device:
     if name != "auto":
         return torch.device(name)
@@ -49,12 +59,16 @@ def main() -> None:
         "--mode",
         choices=[
             "pred",
+            "state_conditioned",
+            "value_conditioned",
             "target",
             "trace",
             "trace_struct",
             "structured_answer",
             "answer_value",
             "latent_nn",
+            "state_conditioned_latent_nn",
+            "value_conditioned_latent_nn",
             "reasoning_ops",
             "trace_ops",
             "trace_state_solver",
@@ -105,13 +119,17 @@ def main() -> None:
         max_trace_len=train_args.get("max_trace_len", 32),
         use_trace_fusion=train_args.get("use_trace_fusion", False),
     ).to(device)
-    model.load_state_dict(ckpt["model"], strict=False)
+    _load_matching_state_dict(model, ckpt["model"])
     model.eval()
     verifier = None
     latent_nn_texts = None
     latent_nn_slots = None
     latent_nn_values = None
-    if args.mode == "latent_nn":
+    if args.mode in {
+        "latent_nn",
+        "state_conditioned_latent_nn",
+        "value_conditioned_latent_nn",
+    }:
         latent_nn_values = [class_to_value(idx) for idx in range(TRACE_VALUE_CLASSES)]
         latent_nn_texts = [str(value) for value in latent_nn_values]
         latent_ids = torch.tensor(
@@ -299,6 +317,41 @@ def main() -> None:
                         )
                         errors_shown += 1
                 continue
+            if args.mode in {"state_conditioned", "value_conditioned"}:
+                if args.mode == "state_conditioned":
+                    decoded = model.solve_ids_from_state_conditioned(
+                        batch["problem_ids"].to(device),
+                        batch["math_ids"].to(device),
+                        pad_id=tokenizer.pad_id,
+                    )
+                else:
+                    decoded = model.solve_ids_from_value_conditioned(
+                        batch["math_ids"].to(device),
+                        pad_id=tokenizer.pad_id,
+                    )
+                predictions = [tokenizer.decode(ids).strip() for ids in decoded]
+                references = batch["answer"]
+                for problem, pred, answer, op_label, split_label in zip(
+                    batch["problem"],
+                    predictions,
+                    references,
+                    batch["op_label"],
+                    batch["split_label"],
+                ):
+                    is_correct = pred == answer
+                    correct += is_correct
+                    total += 1
+                    counts = by_op.setdefault(str(op_label), [0, 0])
+                    counts[0] += int(is_correct)
+                    counts[1] += 1
+                    split_counts = by_split.setdefault(str(split_label), [0, 0])
+                    split_counts[0] += int(is_correct)
+                    split_counts[1] += 1
+                    if shown < 10:
+                        mark = "ok" if is_correct else "bad"
+                        print(f"{mark}: {problem} -> pred={pred!r} target={answer!r}")
+                        shown += 1
+                continue
             if args.mode == "answer_value":
                 pred_ids, confidence = model.predict_answer_value(
                     batch["problem_ids"].to(device),
@@ -331,12 +384,21 @@ def main() -> None:
                         )
                         shown += 1
                 continue
-            if args.mode == "latent_nn":
+            if args.mode in {
+                "latent_nn",
+                "state_conditioned_latent_nn",
+                "value_conditioned_latent_nn",
+            }:
                 assert latent_nn_slots is not None
                 assert latent_nn_values is not None
                 problem_ids = batch["problem_ids"].to(device)
                 math_ids = batch["math_ids"].to(device)
-                pred_slots = model.predict_answer_slots(problem_ids, math_ids)
+                if args.mode == "latent_nn":
+                    pred_slots = model.predict_answer_slots(problem_ids, math_ids)
+                elif args.mode == "state_conditioned_latent_nn":
+                    pred_slots = model.predict_state_conditioned_slots(problem_ids, math_ids)
+                else:
+                    pred_slots = model.predict_value_conditioned_slots(math_ids)
                 pred_flat = F.normalize(pred_slots.flatten(start_dim=1), dim=-1)
                 nearest = (pred_flat @ latent_nn_slots.T).argmax(dim=-1)
                 predictions = [str(latent_nn_values[int(idx)]) for idx in nearest.tolist()]

@@ -36,6 +36,17 @@ def predict_batch(model, batch, tokenizer, device, mode: str = "pred") -> list[s
             pad_id=tokenizer.pad_id,
             math_ids=math_ids.to(device) if math_ids is not None else None,
         )
+    elif mode == "state_conditioned":
+        decoded_ids = model.solve_ids_from_state_conditioned(
+            batch["problem_ids"].to(device),
+            batch["math_ids"].to(device),
+            pad_id=tokenizer.pad_id,
+        )
+    elif mode == "value_conditioned":
+        decoded_ids = model.solve_ids_from_value_conditioned(
+            batch["math_ids"].to(device),
+            pad_id=tokenizer.pad_id,
+        )
     elif mode == "target":
         decoded_ids = model.solve_ids_from_target(
             batch["answer_ids"].to(device),
@@ -421,6 +432,30 @@ def run_stage(
                     trace_state_mask,
                     trace_op_ids,
                 )
+            elif name in {"state_conditioned_latent", "state_conditioned_joint"}:
+                out = model.state_conditioned_latent_loss(
+                    problem_ids,
+                    math_ids,
+                    answer_ids,
+                    answer_len=answer_len,
+                    answer_value_id=answer_value_id,
+                    readout_weight=(
+                        args.state_conditioned_readout_weight
+                        if name == "state_conditioned_joint"
+                        else 0.0
+                    ),
+                )
+            elif name in {"value_conditioned_latent", "value_conditioned_joint"}:
+                out = model.value_conditioned_latent_loss(
+                    answer_value_id,
+                    answer_ids,
+                    answer_len=answer_len,
+                    readout_weight=(
+                        args.state_conditioned_readout_weight
+                        if name == "value_conditioned_joint"
+                        else 0.0
+                    ),
+                )
             elif name == "answer_value_head":
                 with torch.no_grad():
                     slots = model.predict_answer_slots(problem_ids, math_ids)
@@ -442,7 +477,25 @@ def run_stage(
                 pred_stats = evaluate_with_breakdown(
                     model, val_dataset, tokenizer, device, batch_size, mode="pred"
                 )
+                state_conditioned_stats = evaluate_with_breakdown(
+                    model,
+                    val_dataset,
+                    tokenizer,
+                    device,
+                    batch_size,
+                    mode="state_conditioned",
+                )
+                value_conditioned_stats = evaluate_with_breakdown(
+                    model,
+                    val_dataset,
+                    tokenizer,
+                    device,
+                    batch_size,
+                    mode="value_conditioned",
+                )
                 pred_acc = pred_stats["overall"]
+                state_conditioned_acc = state_conditioned_stats["overall"]
+                value_conditioned_acc = value_conditioned_stats["overall"]
                 target_acc = evaluate(
                     model, val_dataset, tokenizer, device, batch_size, mode="target"
                 )
@@ -478,7 +531,10 @@ def run_stage(
                 )
                 print(
                     f"{name} step={step} {metrics} "
-                    f"pred_exact={pred_acc:.3f} target_exact={target_acc:.3f} "
+                    f"pred_exact={pred_acc:.3f} "
+                    f"state_conditioned_exact={state_conditioned_acc:.3f} "
+                    f"value_conditioned_exact={value_conditioned_acc:.3f} "
+                    f"target_exact={target_acc:.3f} "
                     f"trace_exact={trace_acc:.3f} "
                     f"trace_struct_op_acc={trace_struct['trace_struct_op_acc']:.3f} "
                     f"trace_struct_value_acc={trace_struct['trace_struct_value_acc']:.3f} "
@@ -507,6 +563,10 @@ def run_stage(
                     "trace_ops_head",
                     "trace_state_head",
                     "step_state_head",
+                    "state_conditioned_latent",
+                    "state_conditioned_joint",
+                    "value_conditioned_latent",
+                    "value_conditioned_joint",
                     "answer_value_head",
                 }:
                     diag = latent_health(model, val_dataset, device, batch_size)
@@ -521,8 +581,15 @@ def run_stage(
                     model, val_dataset, tokenizer, device, sample_count, mode="pred"
                 ):
                     print(row)
-                if pred_acc > best_acc:
-                    best_acc = pred_acc
+                selection_acc = (
+                    state_conditioned_acc
+                    if name in {"state_conditioned_latent", "state_conditioned_joint"}
+                    else value_conditioned_acc
+                    if name in {"value_conditioned_latent", "value_conditioned_joint"}
+                    else pred_acc
+                )
+                if selection_acc > best_acc:
+                    best_acc = selection_acc
                     save_checkpoint(model, args, tokenizer, output_dir, best_acc)
             if step >= steps:
                 break
@@ -541,6 +608,8 @@ def main() -> None:
     parser.add_argument("--reasoning-head-steps", type=int, default=None)
     parser.add_argument("--trace-ops-head-steps", type=int, default=None)
     parser.add_argument("--answer-value-head-steps", type=int, default=None)
+    parser.add_argument("--state-conditioned-steps", type=int, default=None)
+    parser.add_argument("--state-conditioned-readout-weight", type=float, default=1.0)
     parser.add_argument("--train-size", type=int, default=5000)
     parser.add_argument("--val-size", type=int, default=500)
     parser.add_argument(
@@ -642,6 +711,7 @@ def main() -> None:
         args.reasoning_head_steps = args.reasoning_head_steps or 500
         args.trace_ops_head_steps = args.trace_ops_head_steps or 500
         args.answer_value_head_steps = args.answer_value_head_steps or 500
+        args.state_conditioned_steps = args.state_conditioned_steps or 800
 
     torch.manual_seed(args.seed)
     device = _device(args.device)
@@ -999,6 +1069,110 @@ def main() -> None:
             device=device,
             optimizer=optimizer,
             steps=args.trace_ops_head_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
+
+    if "state_conditioned_latent" in requested_stages or "scl" in requested_stages:
+        for module in model.children():
+            _set_trainable(module, False)
+        _set_trainable(model.state_conditioned_projector, True)
+        _set_trainable(model.answer_value_head, True)
+        params = list(model.state_conditioned_projector.parameters())
+        params += list(model.answer_value_head.parameters())
+        optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.01)
+        best_acc = run_stage(
+            name="state_conditioned_latent",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.state_conditioned_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
+
+    if "state_conditioned_joint" in requested_stages or "scj" in requested_stages:
+        for module in model.children():
+            _set_trainable(module, False)
+        _set_trainable(model.state_conditioned_projector, True)
+        _set_trainable(model.readout, True)
+        _set_trainable(model.answer_value_head, True)
+        params = list(model.state_conditioned_projector.parameters())
+        params += list(model.readout.parameters())
+        params += list(model.answer_value_head.parameters())
+        optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.01)
+        best_acc = run_stage(
+            name="state_conditioned_joint",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.state_conditioned_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
+
+    if "value_conditioned_latent" in requested_stages or "vcl" in requested_stages:
+        for module in model.children():
+            _set_trainable(module, False)
+        _set_trainable(model.value_conditioned_slots, True)
+        _set_trainable(model.value_conditioned_norm, True)
+        params = list(model.value_conditioned_slots.parameters())
+        params += list(model.value_conditioned_norm.parameters())
+        optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.01)
+        best_acc = run_stage(
+            name="value_conditioned_latent",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.state_conditioned_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
+
+    if "value_conditioned_joint" in requested_stages or "vcj" in requested_stages:
+        for module in model.children():
+            _set_trainable(module, False)
+        _set_trainable(model.value_conditioned_slots, True)
+        _set_trainable(model.value_conditioned_norm, True)
+        _set_trainable(model.readout, True)
+        params = list(model.value_conditioned_slots.parameters())
+        params += list(model.value_conditioned_norm.parameters())
+        params += list(model.readout.parameters())
+        optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.01)
+        best_acc = run_stage(
+            name="value_conditioned_joint",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.state_conditioned_steps,
             batch_size=args.batch_size,
             eval_every=args.eval_every,
             sample_count=args.sample_count,

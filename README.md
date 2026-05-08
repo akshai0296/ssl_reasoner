@@ -176,6 +176,19 @@ Current result with `checkpoints/step_state_solver_mixed_only/best.pt`: `1.000` 
 format. This path answers from predicted intermediate/final states rather than the
 decoder's answer-token readout.
 
+The value-conditioned latent bridge connects that exact state result back to answer
+latent slots and the decoder:
+
+```bash
+bash scripts/train_value_conditioned_joint.sh
+bash scripts/eval_value_conditioned_latent.sh
+CURRICULUM=mixed_only bash scripts/eval_value_conditioned_latent.sh
+```
+
+Current result with `checkpoints/value_conditioned_joint_wide/best.pt`: `0.974` on
+`mixed` and `0.876` on `mixed_only`. This is much better than the original direct
+answer-latent decoder path, but the step-state solver remains the exact path.
+
 ## Smoke Train
 
 ```bash

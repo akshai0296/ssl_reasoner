@@ -7,6 +7,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 TRACE_VALUE_CLASSES = 1401
+TRACE_VALUE_MIN = -200
+VALUE_CONDITIONED_MIN = -1000
+VALUE_CONDITIONED_MAX = 1200
+VALUE_CONDITIONED_CLASSES = VALUE_CONDITIONED_MAX - VALUE_CONDITIONED_MIN + 1
 TRACE_STATE_SCALE = 100.0
 MATH_FEATURE_NUM_OFFSET = 1
 MATH_FEATURE_PLUS_ID = 202
@@ -363,6 +367,26 @@ class StepwiseArithmeticStateHead(nn.Module):
         }
 
 
+class StateConditionedSlotProjector(nn.Module):
+    def __init__(self, d_model: int, num_slots: int):
+        super().__init__()
+        self.num_slots = num_slots
+        self.d_model = d_model
+        self.net = nn.Sequential(
+            nn.LayerNorm(d_model + 2),
+            nn.Linear(d_model + 2, d_model * 2),
+            nn.GELU(),
+            nn.Linear(d_model * 2, num_slots * d_model),
+        )
+        self.slot_norm = nn.LayerNorm(d_model)
+
+    def forward(self, context: torch.Tensor, state_values: torch.Tensor) -> torch.Tensor:
+        scaled_state = state_values / TRACE_STATE_SCALE
+        flat_slots = self.net(torch.cat([context, scaled_state], dim=-1))
+        slots = flat_slots.view(context.size(0), self.num_slots, self.d_model)
+        return self.slot_norm(slots)
+
+
 class MathJEPAReadout(nn.Module):
     def __init__(
         self,
@@ -398,6 +422,13 @@ class MathJEPAReadout(nn.Module):
         self.step_state_head = StepwiseArithmeticStateHead(
             math_vocab_size, d_model, max_math_len
         )
+        self.state_conditioned_projector = StateConditionedSlotProjector(
+            d_model, num_slots
+        )
+        self.value_conditioned_slots = nn.Embedding(
+            VALUE_CONDITIONED_CLASSES, num_slots * d_model
+        )
+        self.value_conditioned_norm = nn.LayerNorm(d_model)
         self.target_encoder = SlotTargetEncoder(
             vocab_size, d_model, max_answer_len, num_slots, num_heads=num_heads
         )
@@ -548,6 +579,44 @@ class MathJEPAReadout(nn.Module):
             trace_slots = self.predict_trace_slots(problem_ids, math_ids)
             answer_slots = self.fuse_answer_trace_slots(answer_slots, trace_slots)
         return answer_slots
+
+    def predict_state_conditioned_slots(
+        self, problem_ids: torch.Tensor, math_ids: torch.Tensor
+    ) -> torch.Tensor:
+        context = self.encode_context(problem_ids)
+        state_values = self.step_state_head(math_ids)["values"]
+        return self.state_conditioned_projector(context, state_values)
+
+    def predict_value_conditioned_slots_from_ids(
+        self, answer_value_id: torch.Tensor
+    ) -> torch.Tensor:
+        value_conditioned_id = (
+            answer_value_id + TRACE_VALUE_MIN - VALUE_CONDITIONED_MIN
+        ).clamp(min=0, max=VALUE_CONDITIONED_CLASSES - 1)
+        return self.predict_value_conditioned_slots_from_value_ids(value_conditioned_id)
+
+    def predict_value_conditioned_slots_from_value_ids(
+        self, value_conditioned_id: torch.Tensor
+    ) -> torch.Tensor:
+        flat = self.value_conditioned_slots(value_conditioned_id)
+        slots = flat.view(
+            value_conditioned_id.size(0),
+            self.target_encoder.slot_queries.size(1),
+            -1,
+        )
+        return self.value_conditioned_norm(slots)
+
+    def predict_value_conditioned_slots(self, math_ids: torch.Tensor) -> torch.Tensor:
+        state_values = self.step_state_head(math_ids)["values"]
+        final_values = torch.where(
+            math_ids[:, 3].ne(0),
+            state_values[:, 1],
+            state_values[:, 0],
+        )
+        value_ids = (final_values.round().long() - VALUE_CONDITIONED_MIN).clamp(
+            min=0, max=VALUE_CONDITIONED_CLASSES - 1
+        )
+        return self.predict_value_conditioned_slots_from_value_ids(value_ids)
 
     def readout_loss(
         self,
@@ -708,6 +777,67 @@ class MathJEPAReadout(nn.Module):
             trace_state_mask,
             trace_op_ids,
         )
+
+    def state_conditioned_latent_loss(
+        self,
+        problem_ids: torch.Tensor,
+        math_ids: torch.Tensor,
+        answer_ids: torch.Tensor,
+        answer_len: torch.Tensor | None = None,
+        answer_value_id: torch.Tensor | None = None,
+        readout_weight: float = 0.0,
+    ) -> dict[str, torch.Tensor]:
+        pred_slots = self.predict_state_conditioned_slots(problem_ids, math_ids)
+        with torch.no_grad():
+            target_slots = self.encode_target(answer_ids, use_ema=True)
+        pred_loss = F.smooth_l1_loss(pred_slots, target_slots)
+        contrastive_loss = self.info_nce_loss(pred_slots, target_slots)
+        loss = pred_loss + 0.2 * contrastive_loss
+        result = {
+            "loss": loss,
+            "state_conditioned_pred_loss": pred_loss,
+            "state_conditioned_contrastive_loss": contrastive_loss,
+            "state_conditioned_slots": pred_slots.detach(),
+            "target_slots": target_slots.detach(),
+        }
+        if answer_len is not None and readout_weight > 0:
+            readout = self.readout_loss(pred_slots, answer_ids, answer_len)
+            result["loss"] = result["loss"] + readout_weight * readout["loss"]
+            result["state_conditioned_token_loss"] = readout["token_loss"]
+            result["state_conditioned_length_loss"] = readout["length_loss"]
+        if answer_value_id is not None:
+            answer_value = self.answer_value_loss(pred_slots, answer_value_id)
+            result["loss"] = result["loss"] + answer_value["loss"]
+            result["answer_value_loss"] = answer_value["answer_value_loss"]
+            result["answer_value_acc"] = answer_value["answer_value_acc"]
+        return result
+
+    def value_conditioned_latent_loss(
+        self,
+        answer_value_id: torch.Tensor,
+        answer_ids: torch.Tensor,
+        answer_len: torch.Tensor | None = None,
+        readout_weight: float = 0.0,
+    ) -> dict[str, torch.Tensor]:
+        pred_slots = self.predict_value_conditioned_slots_from_ids(answer_value_id)
+        with torch.no_grad():
+            target_slots = self.encode_target(answer_ids, use_ema=True)
+        pred_loss = F.smooth_l1_loss(pred_slots, target_slots)
+        contrastive_loss = self.info_nce_loss(pred_slots, target_slots)
+        loss = pred_loss + 0.2 * contrastive_loss
+        result = {
+            "loss": loss,
+            "value_conditioned_pred_loss": pred_loss,
+            "value_conditioned_contrastive_loss": contrastive_loss,
+            "value_conditioned_slots": pred_slots.detach(),
+            "target_slots": target_slots.detach(),
+        }
+        if answer_len is not None and readout_weight > 0:
+            readout = self.readout_loss(pred_slots, answer_ids, answer_len)
+            result["loss"] = result["loss"] + readout_weight * readout["loss"]
+            result["value_conditioned_token_loss"] = readout["token_loss"]
+            result["value_conditioned_length_loss"] = readout["length_loss"]
+        return result
 
     def answer_value_loss(
         self, slots: torch.Tensor, answer_value_id: torch.Tensor
@@ -1228,6 +1358,25 @@ class MathJEPAReadout(nn.Module):
         self, math_ids: torch.Tensor
     ) -> torch.Tensor:
         return self.step_state_head(math_ids)["values"]
+
+    @torch.no_grad()
+    def solve_ids_from_state_conditioned(
+        self,
+        problem_ids: torch.Tensor,
+        math_ids: torch.Tensor,
+        pad_id: int,
+    ) -> list[list[int]]:
+        slots = self.predict_state_conditioned_slots(problem_ids, math_ids)
+        return self.readout.decode_ids(slots, pad_id=pad_id)
+
+    @torch.no_grad()
+    def solve_ids_from_value_conditioned(
+        self,
+        math_ids: torch.Tensor,
+        pad_id: int,
+    ) -> list[list[int]]:
+        slots = self.predict_value_conditioned_slots(math_ids)
+        return self.readout.decode_ids(slots, pad_id=pad_id)
 
     @torch.no_grad()
     def predict_answer_value(
