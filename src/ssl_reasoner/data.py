@@ -315,6 +315,7 @@ CURRICULA = (
     "single_op_balanced",
     "mixed_only",
     "multi_step",
+    "multi_step_balanced",
     *sorted(COMPOSITIONAL_CURRICULA),
 )
 
@@ -378,15 +379,58 @@ def generate_math_examples(
         elif curriculum == "multi_step":
             difficulty = 2
             op = None
+        elif curriculum == "multi_step_balanced":
+            difficulty = 2
+            op = None
+            variant = idx % 4
+            if variant == 0:
+                expr, value, op_label = _make_expression(
+                    rng, difficulty, op=op, **expression_kwargs
+                )
+                split_label = "multi_step"
+            elif variant == 1:
+                operands = [_rand_operand(rng, (0, 50))]
+                operands.extend(_rand_operand(rng, (0, 20)) for _ in range(4))
+                expr_ops = [rng.choice(["+", "-", "*"]) for _ in range(4)]
+                if "*" not in expr_ops:
+                    expr_ops[rng.randrange(len(expr_ops))] = "*"
+                expr = "".join(
+                    f"{value}{op_text}" for value, op_text in zip(operands, expr_ops)
+                ) + str(operands[-1])
+                value = eval(expr)
+                op_label = "multi_step"
+                split_label = "longer_expr"
+            elif variant == 2:
+                operands = [_rand_operand(rng, (0, 50))]
+                operands.extend(_rand_operand(rng, (0, 20)) for _ in range(3))
+                expr_ops = [rng.choice(["+", "-"]) for _ in range(3)]
+                expr = "".join(
+                    f"{value}{op_text}" for value, op_text in zip(operands, expr_ops)
+                ) + str(operands[-1])
+                value = eval(expr)
+                op_label = "multi_step"
+                split_label = "no_multiply"
+            else:
+                operands = [_rand_operand(rng, (0, 20)) for _ in range(4)]
+                expr_ops = [rng.choice(["+", "-", "*"]) for _ in range(3)]
+                for op_idx in rng.sample(range(3), k=2):
+                    expr_ops[op_idx] = "*"
+                expr = "".join(
+                    f"{value}{op_text}" for value, op_text in zip(operands, expr_ops)
+                ) + str(operands[-1])
+                value = eval(expr)
+                op_label = "multi_step"
+                split_label = "many_multiply"
         elif curriculum in COMPOSITIONAL_CURRICULA:
             difficulty, op, split_label, expression_kwargs = _compositional_spec(
                 curriculum, idx
             )
         else:
             raise ValueError(f"Unknown curriculum: {curriculum}")
-        expr, value, op_label = _make_expression(
-            rng, difficulty, op=op, **expression_kwargs
-        )
+        if curriculum != "multi_step_balanced":
+            expr, value, op_label = _make_expression(
+                rng, difficulty, op=op, **expression_kwargs
+            )
         template = rng.choice(
             [
                 "What is {expr}?",

@@ -339,14 +339,14 @@ distribution-bound:
 | Preset | Trace exact | Learned step value exact | Learned final value exact |
 | --- | ---: | ---: | ---: |
 | `in_dist` | `1.000` | `1.000` | `1.000` |
-| `larger_numbers` | `0.964` | `0.996` | `0.964` |
-| `longer_expr` | `0.000` | `0.710` | `0.038` |
-| `no_multiply` | `0.100` | `0.500` | `0.100` |
+| `larger_numbers` | `0.998` | `1.000` | `0.998` |
+| `longer_expr` | `1.000` | `1.000` | `1.000` |
+| `no_multiply` | `1.000` | `1.000` | `1.000` |
 | `many_multiply` | `1.000` | `1.000` | `1.000` |
 
-The main remaining weaknesses are longer expressions than the current 8-slot math
-feature window and the no-multiply distribution, where the policy overuses transitions
-learned from the multiplication-heavy training curriculum.
+The variable reasoner now trains with a balanced multi-step curriculum and a 10-token
+math feature window, covering standard, longer, no-multiply, and many-multiply
+expressions. The main remaining gap in this OOD set is rare larger-number misses.
 
 ## Smoke Train
 

@@ -201,6 +201,14 @@ def test_variable_trace_equivalence_accepts_valid_alternate_orders():
     assert trace_final_value("") is None
 
 
+def test_multi_step_balanced_curriculum_includes_ood_variants():
+    examples = generate_math_examples(8, seed=0, curriculum="multi_step_balanced")
+    labels = {example.split_label for example in examples}
+    assert {"multi_step", "longer_expr", "no_multiply", "many_multiply"} <= labels
+    assert any(len(encode_math_features(example.problem, max_len=10)) == 10 for example in examples)
+    assert any("*" not in re.search(r"\d+(?:[+\-*]\d+)+", example.problem).group(0) for example in examples)
+
+
 def test_symbolic_candidate_texts_include_precedence_and_variants():
     candidates = symbolic_candidate_texts("Find the value of 20+1*0.", base_prediction="19")
     assert candidates[0] == "20"
