@@ -467,6 +467,11 @@ PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
   --checkpoint checkpoints/standalone_transition_factor/best.pt \
   --standalone-factor-values \
   --preset all
+
+PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
+  --checkpoint checkpoints/standalone_transition_decomposed_smoke/best.pt \
+  --standalone-decomposed-values \
+  --preset all
 ```
 
 Measured single-step answer exact on 500 generated `single_op_balanced` examples:
@@ -572,6 +577,33 @@ general multi-step arithmetic, while larger-number generalization is still effec
 unsolved. The next real improvement should be algorithmic numeric decomposition
 instead of another direct whole-value head: carry/borrow states for addition/subtraction
 and partial-product states for multiplication.
+
+The first decomposition step adds a place-wise standalone transition head. It predicts
+the result sign and each output digit from:
+
+```text
+global transition encoding + operator + place id + lhs digit + rhs digit + numeric features
+```
+
+The training script can now select checkpoints by this path:
+
+```bash
+STANDALONE_TRANSITION_EVAL_MODE=decomposed \
+CHECKPOINT=checkpoints/standalone_transition_factor/best.pt \
+OUTPUT_DIR=checkpoints/standalone_transition_decomposed_smoke \
+  bash scripts/train_standalone_transition_reductions.sh
+```
+
+A 1000-step smoke run reached `0.692` decomposed validation exact during training, but
+the held-out preset eval is still weaker than class mode:
+
+| Checkpoint / mode | In-dist | Larger numbers | Longer expr | No multiply | Many multiply | Length 8 | Length 16 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `standalone_transition_decomposed_smoke`, decomposed | `0.475` | `0.005` | `0.390` | `0.720` | `0.370` | `0.150` | `0.045` |
+
+This confirms that simply exposing place-wise digit features is not enough. The next
+version needs explicit recurrent carry/borrow supervision for `+`/`-` and partial-product
+accumulation states for `*`, rather than predicting all result digits independently.
 
 ## Smoke Train
 

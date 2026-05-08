@@ -709,7 +709,13 @@ def run_stage(
                     else 0.0
                 )
                 standalone_transition_acc = (
-                    evaluate_standalone_transition(model, val_dataset, device, batch_size)
+                    evaluate_standalone_transition(
+                        model,
+                        val_dataset,
+                        device,
+                        batch_size,
+                        mode=args.standalone_transition_eval_mode,
+                    )
                     if name == "standalone_transition"
                     else 0.0
                 )
@@ -740,6 +746,7 @@ def run_stage(
                         "standalone_transition_coverage",
                         "standalone_transition_digit_acc",
                         "standalone_transition_factor_acc",
+                        "standalone_transition_decomposed_acc",
                     }
                 )
                 print(
@@ -756,7 +763,8 @@ def run_stage(
                     f"trace_state_final_acc={trace_state_final_acc:.3f} "
                     f"step_state_final_acc={step_state_final_acc:.3f} "
                     f"variable_unconstrained_trace_equiv={variable_unconstrained_trace_acc:.3f} "
-                    f"standalone_transition_val_acc={standalone_transition_acc:.3f}"
+                    f"standalone_transition_val_{args.standalone_transition_eval_mode}_acc="
+                    f"{standalone_transition_acc:.3f}"
                 )
                 op_metrics = " ".join(
                     f"{key}={value:.3f}"
@@ -903,6 +911,11 @@ def main() -> None:
     parser.add_argument("--overfit", action="store_true")
     parser.add_argument("--eval-every", type=int, default=50)
     parser.add_argument("--sample-count", type=int, default=5)
+    parser.add_argument(
+        "--standalone-transition-eval-mode",
+        choices=["class", "digit", "factor", "decomposed", "hybrid"],
+        default="hybrid",
+    )
     parser.add_argument("--contrastive-weight", type=float, default=0.5)
     parser.add_argument("--vicreg-weight", type=float, default=0.05)
     parser.add_argument("--slot-diversity-weight", type=float, default=0.1)

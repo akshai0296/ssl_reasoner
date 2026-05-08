@@ -66,6 +66,7 @@ def solve_variable_debug(
         standalone_learned_values=value_mode == "standalone",
         standalone_digit_values=value_mode == "standalone_digit",
         standalone_factor_values=value_mode == "standalone_factor",
+        standalone_decomposed_values=value_mode == "standalone_decomposed",
         standalone_hybrid_values=value_mode == "standalone_hybrid",
     )
     rows = []
@@ -114,6 +115,7 @@ def main() -> None:
             "standalone",
             "standalone_digit",
             "standalone_factor",
+            "standalone_decomposed",
             "standalone_hybrid",
         ],
         default="candidate",

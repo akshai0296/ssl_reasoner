@@ -723,11 +723,15 @@ def test_standalone_transition_forward():
     logits = model.standalone_transition(lhs, op_ids, rhs)
     digit_pred = model.standalone_transition.predict_value(lhs, op_ids, rhs, mode="digit")
     factor_pred = model.standalone_transition.predict_value(lhs, op_ids, rhs, mode="factor")
+    decomposed_pred = model.standalone_transition.predict_value(
+        lhs, op_ids, rhs, mode="decomposed"
+    )
     hybrid_pred = model.standalone_transition.predict_value(lhs, op_ids, rhs, mode="hybrid")
 
     assert logits.shape[0] == 3
     assert digit_pred.shape == (3,)
     assert factor_pred.shape == (3,)
+    assert decomposed_pred.shape == (3,)
     assert hybrid_pred.shape == (3,)
 
 

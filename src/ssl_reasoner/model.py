@@ -23,6 +23,7 @@ STANDALONE_TRANSITION_DIGITS = 10
 FACTOR_BUCKET_BASES = (0, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000)
 FACTOR_BUCKET_SIZES = (10, 90, 900, 9000, 90000, 900000, 9000000, 90000000, 900000000)
 FACTOR_OFFSET_CLASSES = 1000
+DECOMPOSED_DIGIT_FEATURES = 8
 MATH_FEATURE_NUM_OFFSET = 1
 MATH_FEATURE_PLUS_ID = 202
 MATH_FEATURE_MINUS_ID = 203
@@ -68,6 +69,22 @@ class StandaloneArithmeticTransition(nn.Module):
             nn.Linear(d_model * 4, d_model * 2),
             nn.GELU(),
             nn.Linear(d_model * 2, 2 + len(FACTOR_BUCKET_BASES) + FACTOR_OFFSET_CLASSES),
+        )
+        self.place_embed = nn.Embedding(STANDALONE_TRANSITION_DIGITS, d_model)
+        self.input_digit_embed = nn.Embedding(10, d_model)
+        self.decomposed_sign_head = nn.Sequential(
+            nn.LayerNorm(d_model * 3),
+            nn.Linear(d_model * 3, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, 2),
+        )
+        self.decomposed_digit_head = nn.Sequential(
+            nn.LayerNorm(d_model * 7 + DECOMPOSED_DIGIT_FEATURES),
+            nn.Linear(d_model * 7 + DECOMPOSED_DIGIT_FEATURES, d_model * 4),
+            nn.GELU(),
+            nn.Linear(d_model * 4, d_model * 2),
+            nn.GELU(),
+            nn.Linear(d_model * 2, 10),
         )
 
     @staticmethod
@@ -155,6 +172,70 @@ class StandaloneArithmeticTransition(nn.Module):
         sign_logits = logits[:, :2]
         digit_logits = logits[:, 2:].view(-1, STANDALONE_TRANSITION_DIGITS, 10)
         return sign_logits, digit_logits
+
+    @staticmethod
+    def _abs_digit_matrix(values: torch.Tensor) -> torch.Tensor:
+        rounded = values.round().long().abs().clamp(
+            max=(10 ** STANDALONE_TRANSITION_DIGITS) - 1
+        )
+        digits = []
+        for place in reversed(range(STANDALONE_TRANSITION_DIGITS)):
+            divisor = 10 ** place
+            digits.append((rounded // divisor) % 10)
+        return torch.stack(digits, dim=-1)
+
+    def decomposed_logits(
+        self,
+        lhs: torch.Tensor,
+        op_ids: torch.Tensor,
+        rhs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        transition = self.encode_transition(lhs, op_ids, rhs)
+        batch_size = transition.size(0)
+        lhs_digits = self._abs_digit_matrix(lhs)
+        rhs_digits = self._abs_digit_matrix(rhs)
+        place_ids = torch.arange(
+            STANDALONE_TRANSITION_DIGITS,
+            device=transition.device,
+            dtype=torch.long,
+        )
+        place_h = self.place_embed(place_ids).unsqueeze(0).expand(batch_size, -1, -1)
+        lhs_digit_h = self.input_digit_embed(lhs_digits)
+        rhs_digit_h = self.input_digit_embed(rhs_digits)
+        op_h = self.op_embed(op_ids.clamp(min=0, max=3).long()).unsqueeze(1).expand(
+            -1, STANDALONE_TRANSITION_DIGITS, -1
+        )
+        global_h = transition.unsqueeze(1).expand(-1, STANDALONE_TRANSITION_DIGITS, -1)
+        place_scale = place_ids.to(torch.float).div(
+            max(STANDALONE_TRANSITION_DIGITS - 1, 1)
+        ).unsqueeze(0).expand(batch_size, -1)
+        lhs_sign = lhs.lt(0).to(torch.float).unsqueeze(-1).expand(-1, STANDALONE_TRANSITION_DIGITS)
+        rhs_sign = rhs.lt(0).to(torch.float).unsqueeze(-1).expand(-1, STANDALONE_TRANSITION_DIGITS)
+        op_float = op_ids.to(torch.float).unsqueeze(-1).div(3.0).expand(
+            -1, STANDALONE_TRANSITION_DIGITS
+        )
+        numeric_features = torch.stack(
+            [
+                lhs_digits.to(torch.float) / 9.0,
+                rhs_digits.to(torch.float) / 9.0,
+                place_scale,
+                lhs_sign,
+                rhs_sign,
+                op_float,
+                lhs.abs().clamp(max=100000.0).log1p().unsqueeze(-1).expand(
+                    -1, STANDALONE_TRANSITION_DIGITS
+                ) / 12.0,
+                rhs.abs().clamp(max=100000.0).log1p().unsqueeze(-1).expand(
+                    -1, STANDALONE_TRANSITION_DIGITS
+                ) / 12.0,
+            ],
+            dim=-1,
+        )
+        digit_input = torch.cat(
+            [global_h, place_h, lhs_digit_h, rhs_digit_h, op_h, numeric_features],
+            dim=-1,
+        )
+        return self.decomposed_sign_head(transition), self.decomposed_digit_head(digit_input)
 
     @staticmethod
     def value_to_factor_targets(values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -288,8 +369,43 @@ class StandaloneArithmeticTransition(nn.Module):
         factor_acc = (
             (factor_pred == flat_result.round().long()).float() * active_mask
         ).sum() / active_mask.sum().clamp(min=1.0)
+        decomposed_sign_logits, decomposed_digit_logits = self.decomposed_logits(
+            lhs.reshape(-1),
+            op_ids.reshape(-1),
+            rhs.reshape(-1),
+        )
+        decomposed_sign_loss = F.cross_entropy(
+            decomposed_sign_logits,
+            sign_targets,
+            reduction="none",
+        )
+        decomposed_sign_loss = (
+            decomposed_sign_loss * active_mask
+        ).sum() / active_mask.sum().clamp(min=1.0)
+        decomposed_digit_loss = F.cross_entropy(
+            decomposed_digit_logits.reshape(-1, 10),
+            digit_targets.reshape(-1),
+            reduction="none",
+        ).view(-1, STANDALONE_TRANSITION_DIGITS)
+        decomposed_digit_loss = (
+            decomposed_digit_loss.mean(dim=-1) * active_mask
+        ).sum() / active_mask.sum().clamp(min=1.0)
+        decomposed_pred = self.sign_digits_to_value(
+            decomposed_sign_logits.argmax(dim=-1),
+            decomposed_digit_logits.argmax(dim=-1),
+        )
+        decomposed_acc = (
+            (decomposed_pred == flat_result.round().long()).float() * active_mask
+        ).sum() / active_mask.sum().clamp(min=1.0)
         return {
-            "loss": loss + digit_sign_loss + digit_value_loss + factor_loss,
+            "loss": (
+                loss
+                + digit_sign_loss
+                + digit_value_loss
+                + factor_loss
+                + decomposed_sign_loss
+                + decomposed_digit_loss
+            ),
             "standalone_transition_loss": loss,
             "standalone_transition_acc": acc,
             "standalone_transition_coverage": coverage,
@@ -298,6 +414,9 @@ class StandaloneArithmeticTransition(nn.Module):
             "standalone_transition_digit_acc": digit_acc,
             "standalone_transition_factor_loss": factor_loss,
             "standalone_transition_factor_acc": factor_acc,
+            "standalone_transition_decomposed_sign_loss": decomposed_sign_loss,
+            "standalone_transition_decomposed_digit_loss": decomposed_digit_loss,
+            "standalone_transition_decomposed_acc": decomposed_acc,
         }
 
     @torch.no_grad()
@@ -319,6 +438,13 @@ class StandaloneArithmeticTransition(nn.Module):
         )
         if mode == "digit":
             return digit_pred
+        decomposed_sign_logits, decomposed_digit_logits = self.decomposed_logits(lhs, op_ids, rhs)
+        decomposed_pred = self.sign_digits_to_value(
+            decomposed_sign_logits.argmax(dim=-1),
+            decomposed_digit_logits.argmax(dim=-1),
+        )
+        if mode == "decomposed":
+            return decomposed_pred
         factor_sign_logits, factor_bucket_logits, factor_offset_logits = self.factor_logits(
             lhs, op_ids, rhs
         )
@@ -2515,6 +2641,7 @@ class MathJEPAReadout(nn.Module):
         standalone_learned_values: bool = False,
         standalone_digit_values: bool = False,
         standalone_factor_values: bool = False,
+        standalone_decomposed_values: bool = False,
         standalone_hybrid_values: bool = False,
     ) -> list[str]:
         math_rows = math_ids.detach().cpu().tolist()
@@ -2575,6 +2702,7 @@ class MathJEPAReadout(nn.Module):
                     standalone_learned_values
                     or standalone_digit_values
                     or standalone_factor_values
+                    or standalone_decomposed_values
                     or standalone_hybrid_values
                 ):
                     lhs_tensor = torch.tensor([lhs], device=math_ids.device)
@@ -2588,6 +2716,8 @@ class MathJEPAReadout(nn.Module):
                             if standalone_digit_values
                             else "factor"
                             if standalone_factor_values
+                            else "decomposed"
+                            if standalone_decomposed_values
                             else "hybrid"
                             if standalone_hybrid_values
                             else "class"

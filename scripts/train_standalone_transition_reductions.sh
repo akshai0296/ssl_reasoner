@@ -16,4 +16,5 @@ PYTHONUNBUFFERED=1 PYTHONPATH=src python -m ssl_reasoner.train \
   --use-math-features \
   --eval-every "${EVAL_EVERY:-500}" \
   --sample-count "${SAMPLE_COUNT:-3}" \
+  --standalone-transition-eval-mode "${STANDALONE_TRANSITION_EVAL_MODE:-hybrid}" \
   --output-dir "${OUTPUT_DIR:-checkpoints/standalone_transition_reductions}"
