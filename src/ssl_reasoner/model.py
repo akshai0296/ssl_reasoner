@@ -1965,7 +1965,7 @@ class MathJEPAReadout(nn.Module):
             ops = [
                 self._math_op_id(math_row[idx])
                 for idx in range(1, len(math_row), 2)
-                if math_row[idx] != 0
+                if math_row[idx] != 0 and idx + 1 < len(math_row) and math_row[idx + 1] != 0
             ]
             parts = []
             final = None

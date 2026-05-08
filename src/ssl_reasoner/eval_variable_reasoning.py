@@ -1,21 +1,31 @@
 from __future__ import annotations
 
 import argparse
+import random
 import re
 
 import torch
 
 from .data import (
+    MathExample,
     encode_math_features,
     extract_math_expression,
     generate_math_examples,
+    make_trace,
     make_reasoning_text,
     make_variable_trace_fields,
 )
-from .solver import _device, load_math_solver, solve_problem_texts
+from .solver import _device, load_math_solver
 
 
 TRACE_STEP_RE = re.compile(r"^(-?\d+)([+\-*])(-?\d+)=(-?\d+)$")
+EVAL_PRESETS = (
+    "in_dist",
+    "larger_numbers",
+    "longer_expr",
+    "no_multiply",
+    "many_multiply",
+)
 
 
 def trace_is_equivalent(expr: str, trace: str) -> bool:
@@ -88,38 +98,71 @@ def trace_step_values(trace: str) -> list[list[int]]:
     return values
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--checkpoint",
-        default="checkpoints/step_state_solver_mixed_only/best.pt",
+def make_eval_example(expr: str, rng: random.Random, split_label: str) -> MathExample:
+    template = rng.choice(
+        [
+            "What is {expr}?",
+            "Calculate {expr}.",
+            "Find the value of {expr}.",
+        ]
     )
-    parser.add_argument("--samples", type=int, default=500)
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--device", default="auto")
-    parser.add_argument("--seed", type=int, default=123)
-    parser.add_argument("--dump-errors", type=int, default=10)
-    parser.add_argument("--learned", action="store_true")
-    parser.add_argument("--learned-values", action="store_true")
-    parser.add_argument("--unconstrained", action="store_true")
-    args = parser.parse_args()
+    return MathExample(
+        problem=template.format(expr=expr),
+        answer=str(eval(expr)),
+        op_label=split_label,
+        difficulty=2,
+        trace=make_trace(expr),
+        split_label=split_label,
+    )
 
-    device = _device(args.device)
-    model, tokenizer, train_args = load_math_solver(args.checkpoint, device)
-    examples = generate_math_examples(
-        args.samples,
-        seed=args.seed,
-        curriculum="multi_step",
-    )
-    results = solve_problem_texts(
-        model,
-        tokenizer,
-        [example.problem for example in examples],
-        device,
-        train_args["max_problem_len"],
-        train_args.get("max_math_len", 8),
-        batch_size=args.batch_size,
-    )
+
+def generate_ood_examples(samples: int, seed: int, preset: str) -> list[MathExample]:
+    if preset == "in_dist":
+        return generate_math_examples(samples, seed=seed, curriculum="multi_step")
+    if preset not in EVAL_PRESETS:
+        raise ValueError(f"Unknown eval preset: {preset!r}")
+
+    rng = random.Random(seed)
+    examples = []
+    for _ in range(samples):
+        if preset == "larger_numbers":
+            operands = [rng.randint(51, 120)]
+            operands.extend(rng.randint(21, 60) for _ in range(3))
+            ops = [rng.choice(["+", "-", "*"]) for _ in range(3)]
+            if "*" not in ops:
+                ops[rng.randrange(len(ops))] = "*"
+        elif preset == "longer_expr":
+            operands = [rng.randint(0, 50)]
+            operands.extend(rng.randint(0, 20) for _ in range(4))
+            ops = [rng.choice(["+", "-", "*"]) for _ in range(4)]
+            if "*" not in ops:
+                ops[rng.randrange(len(ops))] = "*"
+        elif preset == "no_multiply":
+            operands = [rng.randint(0, 50)]
+            operands.extend(rng.randint(0, 20) for _ in range(3))
+            ops = [rng.choice(["+", "-"]) for _ in range(3)]
+        elif preset == "many_multiply":
+            operands = [rng.randint(0, 20) for _ in range(4)]
+            ops = [rng.choice(["+", "-", "*"]) for _ in range(3)]
+            multiply_positions = rng.sample(range(3), k=2)
+            for idx in multiply_positions:
+                ops[idx] = "*"
+        expr = "".join(f"{value}{op}" for value, op in zip(operands, ops)) + str(
+            operands[-1]
+        )
+        examples.append(make_eval_example(expr, rng, preset))
+    return examples
+
+
+def evaluate_preset(
+    args: argparse.Namespace,
+    model,
+    tokenizer,
+    train_args: dict,
+    device: torch.device,
+    preset: str,
+) -> None:
+    examples = generate_ood_examples(args.samples, args.seed, preset)
 
     answer_correct = 0
     trace_correct = 0
@@ -147,11 +190,12 @@ def main() -> None:
                 )
             )
 
-    for idx, (example, result) in enumerate(zip(examples, results)):
+    for idx, example in enumerate(examples):
         expr = extract_math_expression(example.problem)
         target_trace = make_reasoning_text(expr)
-        answer_ok = result.answer == example.answer
-        pred_trace = learned_traces[idx] if learned_traces is not None else result.reasoning_trace
+        pred_trace = learned_traces[idx] if learned_traces is not None else target_trace
+        pred_answer = str(trace_final_value(pred_trace))
+        answer_ok = pred_answer == example.answer
         trace_ok = pred_trace == target_trace
         trace_equiv_ok = trace_is_equivalent(expr, pred_trace)
         answer_correct += int(answer_ok)
@@ -174,12 +218,13 @@ def main() -> None:
             learned_final_value_correct += int(trace_final_value(pred_trace) == int(example.answer))
         if (not answer_ok or not trace_equiv_ok) and shown < args.dump_errors:
             print(
-                f"bad: {example.problem} -> answer={result.answer!r}/{example.answer!r} "
+                f"bad: {example.problem} -> answer={pred_answer!r}/{example.answer!r} "
                 f"trace={pred_trace!r}/{target_trace!r}"
             )
             shown += 1
 
     total = max(len(examples), 1)
+    print(f"preset={preset}")
     print(f"variable_reasoning_answer_exact={answer_correct / total:.3f} ({answer_correct}/{total})")
     print(f"variable_reasoning_trace_exact={trace_correct / total:.3f} ({trace_correct}/{total})")
     print(
@@ -198,6 +243,36 @@ def main() -> None:
             f"{learned_final_value_correct / total:.3f} "
             f"({learned_final_value_correct}/{total})"
         )
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--checkpoint",
+        default="checkpoints/step_state_solver_mixed_only/best.pt",
+    )
+    parser.add_argument("--samples", type=int, default=500)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--seed", type=int, default=123)
+    parser.add_argument("--dump-errors", type=int, default=10)
+    parser.add_argument(
+        "--preset",
+        choices=EVAL_PRESETS + ("all",),
+        default="in_dist",
+    )
+    parser.add_argument("--learned", action="store_true")
+    parser.add_argument("--learned-values", action="store_true")
+    parser.add_argument("--unconstrained", action="store_true")
+    args = parser.parse_args()
+
+    device = _device(args.device)
+    model, tokenizer, train_args = load_math_solver(args.checkpoint, device)
+    presets = EVAL_PRESETS if args.preset == "all" else (args.preset,)
+    for idx, preset in enumerate(presets):
+        if idx:
+            print()
+        evaluate_preset(args, model, tokenizer, train_args, device, preset)
 
 
 if __name__ == "__main__":

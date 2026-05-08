@@ -311,6 +311,8 @@ CHECKPOINT=checkpoints/variable_reasoner/best.pt \
   bash scripts/eval_variable_reasoning.sh --learned
 CHECKPOINT=checkpoints/variable_reasoner/best.pt \
   bash scripts/eval_variable_reasoning.sh --learned --learned-values
+CHECKPOINT=checkpoints/variable_reasoner/best.pt \
+  bash scripts/eval_variable_reasoning.sh --learned --learned-values --preset all
 ```
 
 Current learned baseline result:
@@ -330,6 +332,21 @@ operators. The `--learned-values` path now uses a structured transition head: it
 the three candidate results `lhs+rhs`, `lhs-rhs`, and `lhs*rhs`, chooses one, and renders
 the resulting `lhs/rhs/result` triples. Legal-position constraints keep inference on the
 canonical precedence and left-to-right schedule.
+
+OOD evaluation presets expose where the current model generalizes and where it is still
+distribution-bound:
+
+| Preset | Trace exact | Learned step value exact | Learned final value exact |
+| --- | ---: | ---: | ---: |
+| `in_dist` | `1.000` | `1.000` | `1.000` |
+| `larger_numbers` | `0.964` | `0.996` | `0.964` |
+| `longer_expr` | `0.000` | `0.710` | `0.038` |
+| `no_multiply` | `0.100` | `0.500` | `0.100` |
+| `many_multiply` | `1.000` | `1.000` | `1.000` |
+
+The main remaining weaknesses are longer expressions than the current 8-slot math
+feature window and the no-multiply distribution, where the policy overuses transitions
+learned from the multiplication-heavy training curriculum.
 
 ## Smoke Train
 
