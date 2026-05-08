@@ -59,17 +59,26 @@ def extract_math_expression(problem: str) -> str:
 
 
 def make_variable_trace_steps(expr: str) -> list[tuple[int, str, int, int]]:
+    return [
+        (lhs, op, rhs, result)
+        for lhs, op, rhs, result, _ in make_variable_trace_steps_with_positions(expr)
+    ]
+
+
+def make_variable_trace_steps_with_positions(
+    expr: str,
+) -> list[tuple[int, str, int, int, int]]:
     parts = re.split(r"([+\-*])", expr)
     values = [int(parts[idx]) for idx in range(0, len(parts), 2)]
     ops = [parts[idx] for idx in range(1, len(parts), 2)]
-    steps: list[tuple[int, str, int, int]] = []
+    steps: list[tuple[int, str, int, int, int]] = []
 
     while "*" in ops:
         idx = ops.index("*")
         lhs = values[idx]
         rhs = values[idx + 1]
         result = lhs * rhs
-        steps.append((lhs, "*", rhs, result))
+        steps.append((lhs, "*", rhs, result, idx))
         values[idx : idx + 2] = [result]
         del ops[idx]
 
@@ -83,7 +92,7 @@ def make_variable_trace_steps(expr: str) -> list[tuple[int, str, int, int]]:
             result = lhs - rhs
         else:
             raise ValueError(f"Unsupported operator: {op}")
-        steps.append((lhs, op, rhs, result))
+        steps.append((lhs, op, rhs, result, 0))
         values[:2] = [result]
         del ops[0]
 
@@ -113,16 +122,18 @@ def make_reasoning_step_texts(expr: str) -> tuple[list[str], list[float]]:
 def make_variable_trace_fields(
     expr: str,
     max_steps: int = 4,
-) -> tuple[list[int], list[list[float]], list[float]]:
-    steps = make_variable_trace_steps(expr)[:max_steps]
-    op_ids = [TRACE_OP_TO_ID[op] for _, op, _, _ in steps]
-    values = [[float(lhs), float(rhs), float(result)] for lhs, _, rhs, result in steps]
+) -> tuple[list[int], list[int], list[list[float]], list[float]]:
+    steps = make_variable_trace_steps_with_positions(expr)[:max_steps]
+    op_ids = [TRACE_OP_TO_ID[op] for _, op, _, _, _ in steps]
+    position_ids = [position for *_, position in steps]
+    values = [[float(lhs), float(rhs), float(result)] for lhs, _, rhs, result, _ in steps]
     mask = [1.0] * len(steps)
     while len(op_ids) < max_steps:
         op_ids.append(TRACE_OP_TO_ID["none"])
+        position_ids.append(0)
         values.append([0.0, 0.0, 0.0])
         mask.append(0.0)
-    return op_ids, values, mask
+    return op_ids, position_ids, values, mask
 
 
 def _value_to_class(value: float) -> int:
@@ -386,7 +397,12 @@ class MathDataset(Dataset):
         trace_state_values, trace_state_mask = make_trace_state_targets(expr)
         reasoning_text = make_reasoning_text(expr)
         reasoning_step_texts, reasoning_step_mask = make_reasoning_step_texts(expr)
-        variable_trace_op_ids, variable_trace_values, variable_trace_mask = (
+        (
+            variable_trace_op_ids,
+            variable_trace_position_ids,
+            variable_trace_values,
+            variable_trace_mask,
+        ) = (
             make_variable_trace_fields(expr)
         )
         reasoning_step_ids = [
@@ -410,6 +426,9 @@ class MathDataset(Dataset):
             "trace_state_values": torch.tensor(trace_state_values, dtype=torch.float),
             "trace_state_mask": torch.tensor(trace_state_mask, dtype=torch.float),
             "variable_trace_op_ids": torch.tensor(variable_trace_op_ids, dtype=torch.long),
+            "variable_trace_position_ids": torch.tensor(
+                variable_trace_position_ids, dtype=torch.long
+            ),
             "variable_trace_values": torch.tensor(variable_trace_values, dtype=torch.float),
             "variable_trace_mask": torch.tensor(variable_trace_mask, dtype=torch.float),
             "reasoning_step_ids": torch.tensor(reasoning_step_ids, dtype=torch.long),

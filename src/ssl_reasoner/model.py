@@ -458,6 +458,7 @@ class VariableStructuredReasoner(nn.Module):
         self.cell = nn.GRUCell(d_model, d_model)
         self.active_head = nn.Linear(d_model, 1)
         self.op_head = nn.Linear(d_model, 4)
+        self.position_head = nn.Linear(d_model, max_steps)
         self.value_head = nn.Sequential(
             nn.LayerNorm(d_model),
             nn.Linear(d_model, d_model),
@@ -482,6 +483,7 @@ class VariableStructuredReasoner(nn.Module):
         return {
             "active_logits": self.active_head(step_states).squeeze(-1),
             "op_logits": self.op_head(step_states),
+            "position_logits": self.position_head(step_states),
             "values": self.value_head(step_states) * VARIABLE_REASONING_SCALE,
         }
 
@@ -489,6 +491,7 @@ class VariableStructuredReasoner(nn.Module):
         self,
         math_ids: torch.Tensor,
         op_targets: torch.Tensor,
+        position_targets: torch.Tensor,
         value_targets: torch.Tensor,
         step_mask: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
@@ -500,6 +503,12 @@ class VariableStructuredReasoner(nn.Module):
             reduction="none",
         ).view_as(step_mask)
         op_loss = (op_loss * step_mask).sum() / step_mask.sum().clamp(min=1.0)
+        position_loss = F.cross_entropy(
+            out["position_logits"].reshape(-1, self.max_steps),
+            position_targets.reshape(-1),
+            reduction="none",
+        ).view_as(step_mask)
+        position_loss = (position_loss * step_mask).sum() / step_mask.sum().clamp(min=1.0)
         value_loss = F.smooth_l1_loss(
             out["values"] / VARIABLE_REASONING_SCALE,
             value_targets / VARIABLE_REASONING_SCALE,
@@ -511,16 +520,21 @@ class VariableStructuredReasoner(nn.Module):
         op_acc = (
             (out["op_logits"].argmax(dim=-1) == op_targets).float() * step_mask
         ).sum() / step_mask.sum().clamp(min=1.0)
+        position_acc = (
+            (out["position_logits"].argmax(dim=-1) == position_targets).float() * step_mask
+        ).sum() / step_mask.sum().clamp(min=1.0)
         value_acc = (
             (out["values"].round() == value_targets).float().mean(dim=-1) * step_mask
         ).sum() / step_mask.sum().clamp(min=1.0)
         return {
-            "loss": active_loss + op_loss + value_loss,
+            "loss": active_loss + op_loss + position_loss + 0.05 * value_loss,
             "variable_active_loss": active_loss,
             "variable_op_loss": op_loss,
+            "variable_position_loss": position_loss,
             "variable_value_loss": value_loss,
             "variable_active_acc": active_acc,
             "variable_op_acc": op_acc,
+            "variable_position_acc": position_acc,
             "variable_value_acc": value_acc,
         }
 
@@ -1005,12 +1019,14 @@ class MathJEPAReadout(nn.Module):
         self,
         math_ids: torch.Tensor,
         variable_trace_op_ids: torch.Tensor,
+        variable_trace_position_ids: torch.Tensor,
         variable_trace_values: torch.Tensor,
         variable_trace_mask: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         return self.variable_structured_reasoner.loss(
             math_ids,
             variable_trace_op_ids,
+            variable_trace_position_ids,
             variable_trace_values,
             variable_trace_mask,
         )
@@ -1812,21 +1828,42 @@ class MathJEPAReadout(nn.Module):
         math_ids: torch.Tensor,
     ) -> list[str]:
         out = self.variable_structured_reasoner(math_ids)
-        op_rows = out["op_logits"].argmax(dim=-1).detach().cpu().tolist()
-        value_rows = out["values"].round().detach().cpu().tolist()
+        position_rows = out["position_logits"].argmax(dim=-1).detach().cpu().tolist()
         math_rows = math_ids.detach().cpu().tolist()
         traces = []
-        for math_row, op_row, value_row in zip(math_rows, op_rows, value_rows):
-            step_count = sum(1 for idx in range(1, len(math_row), 2) if math_row[idx] != 0)
+        for math_row, position_row in zip(math_rows, position_rows):
+            values = [
+                self._math_value(math_row[idx])
+                for idx in range(0, len(math_row), 2)
+                if math_row[idx] != 0 or idx == 0
+            ]
+            ops = [
+                self._math_op_id(math_row[idx])
+                for idx in range(1, len(math_row), 2)
+                if math_row[idx] != 0
+            ]
             parts = []
             final = None
-            for op_id, values in zip(op_row[:step_count], value_row[:step_count]):
-                lhs = int(values[0])
-                rhs = int(values[1])
-                result = int(values[2])
-                op = self._trace_op_to_text(int(op_id))
+            for predicted_position in position_row[: len(ops)]:
+                if not ops:
+                    break
+                position = min(max(int(predicted_position), 0), len(ops) - 1)
+                lhs = values[position]
+                rhs = values[position + 1]
+                op_id = ops[position]
+                if op_id == 1:
+                    result = lhs + rhs
+                elif op_id == 2:
+                    result = lhs - rhs
+                elif op_id == 3:
+                    result = lhs * rhs
+                else:
+                    break
+                op = self._trace_op_to_text(op_id)
                 parts.append(f"{lhs}{op}{rhs}={result}")
                 final = result
+                values[position : position + 2] = [result]
+                del ops[position]
             traces.append(",".join(parts + ([str(final)] if final is not None else [])))
         return traces
 

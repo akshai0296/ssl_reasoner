@@ -251,12 +251,10 @@ def evaluate_variable_reasoner(model, dataset, device, batch_size: int) -> float
     total = 0
     for batch in loader:
         pred = model.variable_structured_reasoner(batch["math_ids"].to(device))
-        op_ids = pred["op_logits"].argmax(dim=-1)
-        values = pred["values"].round()
-        target_ops = batch["variable_trace_op_ids"].to(device)
-        target_values = batch["variable_trace_values"].to(device)
+        position_ids = pred["position_logits"].argmax(dim=-1)
+        target_positions = batch["variable_trace_position_ids"].to(device)
         mask = batch["variable_trace_mask"].to(device)
-        step_ok = (op_ids == target_ops) & (values == target_values).all(dim=-1)
+        step_ok = position_ids == target_positions
         example_ok = ((step_ok.float() * mask).sum(dim=-1) == mask.sum(dim=-1)).float()
         correct += int(example_ok.sum().item())
         total += int(example_ok.numel())
@@ -350,6 +348,7 @@ def run_stage(
             trace_state_values = batch["trace_state_values"].to(device)
             trace_state_mask = batch["trace_state_mask"].to(device)
             variable_trace_op_ids = batch["variable_trace_op_ids"].to(device)
+            variable_trace_position_ids = batch["variable_trace_position_ids"].to(device)
             variable_trace_values = batch["variable_trace_values"].to(device)
             variable_trace_mask = batch["variable_trace_mask"].to(device)
             reasoning_step_ids = batch["reasoning_step_ids"].to(device)
@@ -480,6 +479,7 @@ def run_stage(
                 out = model.variable_reasoning_loss(
                     math_ids,
                     variable_trace_op_ids,
+                    variable_trace_position_ids,
                     variable_trace_values,
                     variable_trace_mask,
                 )
@@ -593,6 +593,7 @@ def run_stage(
                         "answer_value_acc",
                         "variable_active_acc",
                         "variable_op_acc",
+                        "variable_position_acc",
                         "variable_value_acc",
                     }
                 )
