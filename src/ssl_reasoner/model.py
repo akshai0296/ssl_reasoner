@@ -458,7 +458,8 @@ class VariableStructuredReasoner(nn.Module):
         self.cell = nn.GRUCell(d_model, d_model)
         self.active_head = nn.Linear(d_model, 1)
         self.op_head = nn.Linear(d_model, 4)
-        self.position_head = nn.Linear(d_model, max_steps)
+        self.position_query = nn.Linear(d_model, d_model)
+        self.position_key = nn.Linear(d_model + 5, d_model)
         self.value_head = nn.Sequential(
             nn.LayerNorm(d_model),
             nn.Linear(d_model, d_model),
@@ -466,13 +467,69 @@ class VariableStructuredReasoner(nn.Module):
             nn.Linear(d_model, 3),
         )
 
-    def forward(self, math_ids: torch.Tensor) -> dict[str, torch.Tensor]:
+    def pointer_logits_for_ops(
+        self,
+        hidden: torch.Tensor,
+        op_ids: torch.Tensor,
+        device: torch.device,
+    ) -> torch.Tensor:
+        op_embeddings = self.token_embed(op_ids)
+        op_values = (op_ids - MATH_FEATURE_PLUS_ID).clamp(min=0, max=2)
+        op_features = torch.stack(
+            [
+                op_ids.ne(0).float(),
+                op_ids.eq(MATH_FEATURE_PLUS_ID).float(),
+                op_ids.eq(MATH_FEATURE_MINUS_ID).float(),
+                op_ids.eq(MATH_FEATURE_TIMES_ID).float(),
+                op_values.float() / 2.0,
+            ],
+            dim=-1,
+        ).to(device)
+        op_keys = self.position_key(torch.cat([op_embeddings, op_features], dim=-1))
+        return (
+            self.position_query(hidden).unsqueeze(1) * op_keys
+        ).sum(dim=-1) / (op_keys.size(-1) ** 0.5)
+
+    def encode_initial(self, math_ids: torch.Tensor) -> torch.Tensor:
         mask = math_ids.ne(0)
         tokens = self.token_embed(math_ids) + self.pos_embed[:, : math_ids.size(1)]
         denom = mask.sum(dim=1, keepdim=True).clamp(min=1).to(tokens.dtype)
         pooled = (tokens * mask.unsqueeze(-1)).sum(dim=1) / denom
         math_features = math_ids.float() / MATH_FEATURE_TIMES_ID
-        hidden = self.input_proj(torch.cat([pooled, math_features], dim=-1))
+        return self.input_proj(torch.cat([pooled, math_features], dim=-1))
+
+    def dynamic_position_logits(
+        self,
+        math_ids: torch.Tensor,
+        position_targets: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        hidden = self.encode_initial(math_ids)
+        op_rows = math_ids[:, 1::2].detach().cpu().tolist()
+        logits = []
+        for step in range(self.max_steps):
+            step_input = self.step_embed[step].unsqueeze(0).expand(math_ids.size(0), -1)
+            hidden = self.cell(step_input, hidden)
+            op_tensor = math_ids.new_zeros((math_ids.size(0), self.max_steps))
+            for row_idx, row_ops in enumerate(op_rows):
+                current_ops = row_ops[: self.max_steps]
+                if current_ops:
+                    op_tensor[row_idx, : len(current_ops)] = torch.tensor(
+                        current_ops,
+                        device=math_ids.device,
+                        dtype=torch.long,
+                    )
+            step_logits = self.pointer_logits_for_ops(hidden, op_tensor, math_ids.device)
+            step_logits = step_logits.masked_fill(op_tensor.eq(0), -1e4)
+            logits.append(step_logits)
+            if position_targets is not None:
+                target_positions = position_targets[:, step].detach().cpu().tolist()
+                for row_idx, target_position in enumerate(target_positions):
+                    if 0 <= target_position < len(op_rows[row_idx]):
+                        del op_rows[row_idx][target_position]
+        return torch.stack(logits, dim=1)
+
+    def forward(self, math_ids: torch.Tensor) -> dict[str, torch.Tensor]:
+        hidden = self.encode_initial(math_ids)
 
         states = []
         for step in range(self.max_steps):
@@ -480,12 +537,22 @@ class VariableStructuredReasoner(nn.Module):
             hidden = self.cell(step_input, hidden)
             states.append(hidden)
         step_states = torch.stack(states, dim=1)
+        position_logits = self.dynamic_position_logits(math_ids)
         return {
             "active_logits": self.active_head(step_states).squeeze(-1),
             "op_logits": self.op_head(step_states),
-            "position_logits": self.position_head(step_states),
+            "position_logits": position_logits,
             "values": self.value_head(step_states) * VARIABLE_REASONING_SCALE,
         }
+
+    @torch.no_grad()
+    def initial_hidden(self, math_ids: torch.Tensor) -> torch.Tensor:
+        return self.encode_initial(math_ids)
+
+    @torch.no_grad()
+    def advance_hidden(self, hidden: torch.Tensor, step_idx: int) -> torch.Tensor:
+        step_input = self.step_embed[step_idx].unsqueeze(0).expand(hidden.size(0), -1)
+        return self.cell(step_input, hidden)
 
     def loss(
         self,
@@ -497,6 +564,7 @@ class VariableStructuredReasoner(nn.Module):
         step_mask: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         out = self(math_ids)
+        position_logits = self.dynamic_position_logits(math_ids, position_targets)
         active_loss = F.binary_cross_entropy_with_logits(out["active_logits"], step_mask)
         op_loss = F.cross_entropy(
             out["op_logits"].reshape(-1, 4),
@@ -505,13 +573,13 @@ class VariableStructuredReasoner(nn.Module):
         ).view_as(step_mask)
         op_loss = (op_loss * step_mask).sum() / step_mask.sum().clamp(min=1.0)
         position_loss = F.cross_entropy(
-            out["position_logits"].reshape(-1, self.max_steps),
+            position_logits.reshape(-1, self.max_steps),
             position_targets.reshape(-1),
             reduction="none",
         ).view_as(step_mask)
         position_loss = (position_loss * step_mask).sum() / step_mask.sum().clamp(min=1.0)
         legal_loss = F.binary_cross_entropy_with_logits(
-            out["position_logits"],
+            position_logits,
             legal_position_targets,
             reduction="none",
         ).mean(dim=-1)
@@ -528,9 +596,9 @@ class VariableStructuredReasoner(nn.Module):
             (out["op_logits"].argmax(dim=-1) == op_targets).float() * step_mask
         ).sum() / step_mask.sum().clamp(min=1.0)
         position_acc = (
-            (out["position_logits"].argmax(dim=-1) == position_targets).float() * step_mask
+            (position_logits.argmax(dim=-1) == position_targets).float() * step_mask
         ).sum() / step_mask.sum().clamp(min=1.0)
-        legal_pred = out["position_logits"].sigmoid().ge(0.5).float()
+        legal_pred = position_logits.sigmoid().ge(0.5).float()
         legal_acc = (
             (legal_pred == legal_position_targets).float().mean(dim=-1) * step_mask
         ).sum() / step_mask.sum().clamp(min=1.0)
@@ -1843,14 +1911,10 @@ class MathJEPAReadout(nn.Module):
         math_ids: torch.Tensor,
         constrain_to_legal: bool = True,
     ) -> list[str]:
-        out = self.variable_structured_reasoner(math_ids)
-        position_logits_rows = out["position_logits"].detach().cpu().tolist()
-        legal_rows = out["position_logits"].sigmoid().ge(0.5).detach().cpu().tolist()
         math_rows = math_ids.detach().cpu().tolist()
+        hidden_rows = self.variable_structured_reasoner.initial_hidden(math_ids)
         traces = []
-        for math_row, position_logit_row, legal_row in zip(
-            math_rows, position_logits_rows, legal_rows
-        ):
+        for row_idx, math_row in enumerate(math_rows):
             values = [
                 self._math_value(math_row[idx])
                 for idx in range(0, len(math_row), 2)
@@ -1863,21 +1927,25 @@ class MathJEPAReadout(nn.Module):
             ]
             parts = []
             final = None
+            hidden = hidden_rows[row_idx : row_idx + 1]
             for step_idx in range(len(ops)):
                 if not ops:
                     break
-                step_logits = position_logit_row[step_idx][: len(ops)]
-                if constrain_to_legal:
-                    legal_positions = [
-                        idx for idx, is_legal in enumerate(legal_row[step_idx][: len(ops)])
-                        if is_legal
-                    ]
-                    if legal_positions:
-                        position = max(legal_positions, key=lambda idx: step_logits[idx])
-                    else:
-                        position = max(range(len(step_logits)), key=lambda idx: step_logits[idx])
-                else:
-                    position = max(range(len(step_logits)), key=lambda idx: step_logits[idx])
+                hidden = self.variable_structured_reasoner.advance_hidden(hidden, step_idx)
+                current_op_ids = torch.tensor(
+                    [
+                        MATH_FEATURE_PLUS_ID + op_id - 1
+                        for op_id in ops
+                    ],
+                    device=math_ids.device,
+                    dtype=torch.long,
+                ).unsqueeze(0)
+                step_logits = self.variable_structured_reasoner.pointer_logits_for_ops(
+                    hidden,
+                    current_op_ids,
+                    math_ids.device,
+                )[0].detach().cpu().tolist()
+                position = max(range(len(step_logits)), key=lambda idx: step_logits[idx])
                 lhs = values[position]
                 rhs = values[position + 1]
                 op_id = ops[position]
