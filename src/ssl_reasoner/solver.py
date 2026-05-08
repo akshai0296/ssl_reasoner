@@ -193,6 +193,9 @@ def load_math_solver(
 ) -> tuple[MathJEPAReadout, CharTokenizer, dict]:
     ckpt = torch.load(checkpoint_path, map_location=device)
     args = ckpt["args"]
+    args["_checkpoint_has_step_state_head"] = any(
+        key.startswith("step_state_head.") for key in ckpt["model"]
+    )
     tokenizer = build_math_tokenizer()
     model = MathJEPAReadout(
         vocab_size=tokenizer.vocab_size,

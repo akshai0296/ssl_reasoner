@@ -226,9 +226,12 @@ CURRICULUM=mixed_only bash scripts/eval_reasoning_sequence.sh
 Inspect the structured reasoning fields for one query with:
 
 ```bash
-CHECKPOINT=checkpoints/step_state_solver_mixed_only/best.pt \
-  bash scripts/solve_math.sh --debug-reasoning "What is 49-5+19?"
+bash scripts/solve_math.sh --debug-reasoning "What is 49-5+19?"
 ```
+
+When `--debug-reasoning` is used without `CHECKPOINT=...`, the script defaults to
+`checkpoints/step_state_solver_mixed_only/best.pt` because that checkpoint contains the
+trained step-state head needed for stable reasoning traces.
 
 Example debug output:
 

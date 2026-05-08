@@ -24,6 +24,12 @@ def main() -> None:
 
     device = _device(args.device)
     model, tokenizer, train_args = load_math_solver(args.checkpoint, device)
+    if args.debug_reasoning and not train_args.get("_checkpoint_has_step_state_head", False):
+        raise SystemExit(
+            "--debug-reasoning requires a checkpoint with a trained step_state_head. "
+            "Use CHECKPOINT=checkpoints/step_state_solver_mixed_only/best.pt or "
+            "CHECKPOINT=checkpoints/reasoning_sequence/best.pt."
+        )
     results = solve_problem_texts(
         model,
         tokenizer,
