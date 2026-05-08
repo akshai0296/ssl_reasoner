@@ -10,8 +10,9 @@ The first target is intentionally narrow and math-only:
 4. Stage 2: freeze the predictor and train the deterministic readout on predicted slots.
 5. Evaluate exact-match numeric answers.
 
-No autoregressive generation is used. The readout predicts all token positions and answer
-length in one forward pass.
+The original answer readout predicts all token positions and answer length in one forward
+pass. The newer step-by-step reasoning decoder is autoregressive, but it is still trained
+from scratch inside this repo and is not a pretrained LLM.
 
 ## Architecture Flow
 
@@ -188,6 +189,57 @@ CURRICULUM=mixed_only bash scripts/eval_value_conditioned_latent.sh
 Current result with `checkpoints/value_conditioned_joint_wide/best.pt`: `0.974` on
 `mixed` and `0.876` on `mixed_only`. This is much better than the original direct
 answer-latent decoder path, but the step-state solver remains the exact path.
+
+## Step-by-Step Reasoning Sequence
+
+This path predicts a sequence of latent reasoning states, then decodes all states plus the
+final answer into compact trace tokens with a decoder trained from scratch:
+
+```text
+problem text
+  -> tokenizer + math feature extractor
+  -> problem encoder
+  -> step-state solver
+  -> predicted intermediate/final state values
+  -> reasoning-state latent projector
+  -> [step 1 latent slots, step 2 latent slots, final-answer latent slots]
+  -> scratch autoregressive reasoning decoder
+  -> trace text + final answer
+```
+
+For example:
+
+```text
+input:  "What is 20+1*0?"
+states: [1*0=0, 20+0=20, 20]
+tokens: "1*0=0,20+0=20,20"
+```
+
+Train and evaluate it with:
+
+```bash
+bash scripts/train_reasoning_sequence.sh
+bash scripts/eval_reasoning_sequence.sh
+CURRICULUM=mixed_only bash scripts/eval_reasoning_sequence.sh
+```
+
+The current checkpoint is:
+
+```text
+checkpoints/reasoning_sequence/best.pt
+```
+
+Current 500-sample result:
+
+| Curriculum | Exact trace+answer match |
+| --- | ---: |
+| `mixed` | `0.342` |
+| `mixed_only` | `0.040` |
+
+This is a real learned latent-to-token reasoning path, but it is not yet the strongest
+solver. The exact step-state solver reaches `1.000` on the supported one- and two-op
+format; the reasoning-sequence decoder still confuses operands and intermediate values,
+especially on mixed expressions.
 
 ## Smoke Train
 

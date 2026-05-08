@@ -223,6 +223,72 @@ class ParallelReadoutDecoder(nn.Module):
         return decoded
 
 
+class AutoregressiveReadoutDecoder(nn.Module):
+    """Scratch latent-slot to token decoder with teacher forcing."""
+
+    def __init__(
+        self,
+        d_model: int,
+        vocab_size: int,
+        max_len: int,
+        num_layers: int = 2,
+        num_heads: int = 4,
+    ):
+        super().__init__()
+        self.max_len = max_len
+        self.token_embed = nn.Embedding(vocab_size, d_model)
+        self.pos_embed = nn.Parameter(torch.randn(1, max_len, d_model) * 0.02)
+        layer = nn.TransformerDecoderLayer(
+            d_model=d_model,
+            nhead=num_heads,
+            dim_feedforward=d_model * 4,
+            batch_first=True,
+            norm_first=True,
+            activation="gelu",
+        )
+        self.decoder = nn.TransformerDecoder(layer, num_layers=num_layers)
+        self.lm_head = nn.Linear(d_model, vocab_size)
+
+    def forward(self, slots: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
+        seq_len = input_ids.size(1)
+        x = self.token_embed(input_ids) + self.pos_embed[:, :seq_len]
+        causal_mask = torch.triu(
+            torch.ones(seq_len, seq_len, device=input_ids.device, dtype=torch.bool),
+            diagonal=1,
+        )
+        h = self.decoder(tgt=x, memory=slots, tgt_mask=causal_mask)
+        return self.lm_head(h)
+
+    @torch.no_grad()
+    def decode_ids(
+        self,
+        slots: torch.Tensor,
+        bos_id: int,
+        eos_id: int,
+        pad_id: int,
+    ) -> list[list[int]]:
+        batch = slots.size(0)
+        ids = torch.full((batch, 1), bos_id, device=slots.device, dtype=torch.long)
+        finished = torch.zeros(batch, device=slots.device, dtype=torch.bool)
+        for _ in range(self.max_len - 1):
+            logits = self.forward(slots, ids)
+            next_ids = logits[:, -1].argmax(dim=-1)
+            next_ids = torch.where(finished, torch.full_like(next_ids, pad_id), next_ids)
+            ids = torch.cat([ids, next_ids.unsqueeze(1)], dim=1)
+            finished = finished | next_ids.eq(eos_id)
+            if finished.all():
+                break
+        if ids.size(1) < self.max_len:
+            pad = torch.full(
+                (batch, self.max_len - ids.size(1)),
+                pad_id,
+                device=slots.device,
+                dtype=torch.long,
+            )
+            ids = torch.cat([ids, pad], dim=1)
+        return ids.tolist()
+
+
 class LatentVerifier(nn.Module):
     """Score whether a candidate answer latent is correct for a problem latent."""
 
@@ -387,6 +453,45 @@ class StateConditionedSlotProjector(nn.Module):
         return self.slot_norm(slots)
 
 
+class ReasoningStateSequenceProjector(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_slots: int,
+        max_math_len: int,
+        num_states: int = 3,
+    ):
+        super().__init__()
+        self.num_slots = num_slots
+        self.d_model = d_model
+        self.num_states = num_states
+        self.max_math_len = max_math_len
+        self.net = nn.Sequential(
+            nn.LayerNorm(d_model + 2 + max_math_len),
+            nn.Linear(d_model + 2 + max_math_len, d_model * 3),
+            nn.GELU(),
+            nn.Linear(d_model * 3, num_states * num_slots * d_model),
+        )
+        self.slot_norm = nn.LayerNorm(d_model)
+
+    def forward(
+        self,
+        context: torch.Tensor,
+        state_values: torch.Tensor,
+        math_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        scaled_state = state_values / TRACE_STATE_SCALE
+        math_features = math_ids[:, : self.max_math_len].float() / MATH_FEATURE_TIMES_ID
+        flat = self.net(torch.cat([context, scaled_state, math_features], dim=-1))
+        slots = flat.view(
+            context.size(0),
+            self.num_states,
+            self.num_slots,
+            self.d_model,
+        )
+        return self.slot_norm(slots)
+
+
 class MathJEPAReadout(nn.Module):
     def __init__(
         self,
@@ -424,6 +529,22 @@ class MathJEPAReadout(nn.Module):
         )
         self.state_conditioned_projector = StateConditionedSlotProjector(
             d_model, num_slots
+        )
+        self.reasoning_sequence_projector = ReasoningStateSequenceProjector(
+            d_model, num_slots, max_math_len
+        )
+        self.reasoning_sequence_readout = AutoregressiveReadoutDecoder(
+            d_model,
+            vocab_size,
+            max_trace_len,
+            num_layers=readout_layers,
+            num_heads=num_heads,
+        )
+        self.reasoning_sequence_struct_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, 4 + 3 * TRACE_VALUE_CLASSES),
         )
         self.value_conditioned_slots = nn.Embedding(
             VALUE_CONDITIONED_CLASSES, num_slots * d_model
@@ -586,6 +707,13 @@ class MathJEPAReadout(nn.Module):
         context = self.encode_context(problem_ids)
         state_values = self.step_state_head(math_ids)["values"]
         return self.state_conditioned_projector(context, state_values)
+
+    def predict_reasoning_state_slots(
+        self, problem_ids: torch.Tensor, math_ids: torch.Tensor
+    ) -> torch.Tensor:
+        context = self.encode_context(problem_ids)
+        state_values = self.step_state_head(math_ids)["values"]
+        return self.reasoning_sequence_projector(context, state_values, math_ids)
 
     def predict_value_conditioned_slots_from_ids(
         self, answer_value_id: torch.Tensor
@@ -838,6 +966,111 @@ class MathJEPAReadout(nn.Module):
             result["value_conditioned_token_loss"] = readout["token_loss"]
             result["value_conditioned_length_loss"] = readout["length_loss"]
         return result
+
+    def reasoning_sequence_loss(
+        self,
+        problem_ids: torch.Tensor,
+        math_ids: torch.Tensor,
+        reasoning_step_ids: torch.Tensor,
+        reasoning_step_mask: torch.Tensor,
+        reasoning_ids: torch.Tensor,
+        reasoning_len: torch.Tensor,
+        trace_op_ids: torch.Tensor | None = None,
+        trace_value_ids: torch.Tensor | None = None,
+        trace_value_mask: torch.Tensor | None = None,
+        answer_value_id: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        pred_slots = self.predict_reasoning_state_slots(problem_ids, math_ids)
+        batch, num_states, num_slots, d_model = pred_slots.shape
+        flat_pred = pred_slots.reshape(batch * num_states, num_slots, d_model)
+        flat_ids = reasoning_step_ids.reshape(batch * num_states, -1)
+        flat_mask = reasoning_step_mask.reshape(batch * num_states)
+        with torch.no_grad():
+            target_slots = self.encode_target(flat_ids, use_ema=True)
+        per_state = F.smooth_l1_loss(flat_pred, target_slots, reduction="none").mean(dim=(1, 2))
+        latent_loss = (per_state * flat_mask).sum() / flat_mask.sum().clamp(min=1.0)
+        sequence_slots = pred_slots.reshape(batch, num_states * num_slots, d_model)
+        readout = self.reasoning_sequence_readout(sequence_slots, reasoning_ids[:, :-1])
+        token_loss = F.cross_entropy(
+            readout.transpose(1, 2),
+            reasoning_ids[:, 1:],
+            ignore_index=0,
+        )
+        loss = latent_loss + token_loss
+        result = {
+            "loss": loss,
+            "reasoning_state_latent_loss": latent_loss,
+            "reasoning_sequence_token_loss": token_loss,
+            "reasoning_sequence_length_loss": token_loss.new_tensor(0.0),
+            "reasoning_state_slots": pred_slots.detach(),
+        }
+        if (
+            trace_op_ids is not None
+            and trace_value_ids is not None
+            and trace_value_mask is not None
+            and answer_value_id is not None
+        ):
+            struct = self.reasoning_sequence_struct_loss(
+                pred_slots,
+                trace_op_ids,
+                trace_value_ids,
+                trace_value_mask,
+                answer_value_id,
+            )
+            result["loss"] = result["loss"] + 0.5 * struct["loss"]
+            result["reasoning_sequence_struct_op_acc"] = struct[
+                "reasoning_sequence_struct_op_acc"
+            ]
+            result["reasoning_sequence_struct_value_acc"] = struct[
+                "reasoning_sequence_struct_value_acc"
+            ]
+            result["reasoning_sequence_struct_loss"] = struct["loss"]
+        return result
+
+    def reasoning_sequence_struct_loss(
+        self,
+        pred_slots: torch.Tensor,
+        trace_op_ids: torch.Tensor,
+        trace_value_ids: torch.Tensor,
+        trace_value_mask: torch.Tensor,
+        answer_value_id: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        batch, num_states, _, d_model = pred_slots.shape
+        pred = self.reasoning_sequence_struct_head(
+            pred_slots.reshape(batch * num_states, -1, d_model).mean(dim=1)
+        )
+        pred = pred.view(batch, num_states, -1)
+        op_logits = pred[:, :, :4]
+        value_logits = pred[:, :, 4:].view(batch, num_states, 3, TRACE_VALUE_CLASSES)
+
+        op_targets = trace_op_ids.new_zeros(batch, num_states)
+        op_targets[:, :2] = trace_op_ids[:, :2]
+
+        value_targets = trace_value_ids.new_zeros(batch, num_states, 3)
+        value_masks = trace_value_mask.new_zeros(batch, num_states, 3)
+        value_targets[:, 0] = trace_value_ids[:, :3]
+        value_masks[:, 0] = trace_value_mask[:, :3]
+        value_targets[:, 1] = trace_value_ids[:, 3:6]
+        value_masks[:, 1] = trace_value_mask[:, 3:6]
+        value_targets[:, 2, 2] = answer_value_id
+        value_masks[:, 2, 2] = 1.0
+
+        op_loss = F.cross_entropy(op_logits.reshape(-1, 4), op_targets.reshape(-1))
+        per_value_loss = F.cross_entropy(
+            value_logits.reshape(-1, TRACE_VALUE_CLASSES),
+            value_targets.reshape(-1),
+            reduction="none",
+        ).view_as(value_masks)
+        value_loss = (per_value_loss * value_masks).sum() / value_masks.sum().clamp(min=1.0)
+        op_acc = (op_logits.argmax(dim=-1) == op_targets).float().mean()
+        value_acc = (
+            (value_logits.argmax(dim=-1) == value_targets).float() * value_masks
+        ).sum() / value_masks.sum().clamp(min=1.0)
+        return {
+            "loss": op_loss + value_loss,
+            "reasoning_sequence_struct_op_acc": op_acc,
+            "reasoning_sequence_struct_value_acc": value_acc,
+        }
 
     def answer_value_loss(
         self, slots: torch.Tensor, answer_value_id: torch.Tensor
@@ -1377,6 +1610,25 @@ class MathJEPAReadout(nn.Module):
     ) -> list[list[int]]:
         slots = self.predict_value_conditioned_slots(math_ids)
         return self.readout.decode_ids(slots, pad_id=pad_id)
+
+    @torch.no_grad()
+    def solve_reasoning_sequence_ids(
+        self,
+        problem_ids: torch.Tensor,
+        math_ids: torch.Tensor,
+        bos_id: int,
+        eos_id: int,
+        pad_id: int,
+    ) -> list[list[int]]:
+        slots = self.predict_reasoning_state_slots(problem_ids, math_ids)
+        batch, num_states, num_slots, d_model = slots.shape
+        sequence_slots = slots.reshape(batch, num_states * num_slots, d_model)
+        return self.reasoning_sequence_readout.decode_ids(
+            sequence_slots,
+            bos_id=bos_id,
+            eos_id=eos_id,
+            pad_id=pad_id,
+        )
 
     @torch.no_grad()
     def predict_answer_value(

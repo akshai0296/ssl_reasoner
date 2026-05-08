@@ -69,6 +69,19 @@ def make_trace(expr: str) -> str:
     return f"{first_expr}={first_value} {second_expr}={second_value}"
 
 
+def make_reasoning_text(expr: str) -> str:
+    trace = make_trace(expr)
+    return f"{trace.replace(' ', ',')},{eval(expr)}"
+
+
+def make_reasoning_step_texts(expr: str) -> tuple[list[str], list[float]]:
+    trace_parts = make_trace(expr).split()
+    answer = str(eval(expr))
+    if len(trace_parts) == 1:
+        return [trace_parts[0], answer, ""], [1.0, 1.0, 0.0]
+    return [trace_parts[0], trace_parts[1], answer], [1.0, 1.0, 1.0]
+
+
 def _value_to_class(value: float) -> int:
     return int(max(TRACE_VALUE_MIN, min(TRACE_VALUE_MAX, int(value)))) - TRACE_VALUE_MIN
 
@@ -316,8 +329,17 @@ class MathDataset(Dataset):
         trace_state_values, trace_state_mask = make_trace_state_targets(
             re.search(r"\d+[+\-*]\d+(?:[+\-*]\d+)?", ex.problem).group(0)
         )
+        expr = re.search(r"\d+[+\-*]\d+(?:[+\-*]\d+)?", ex.problem).group(0)
+        reasoning_text = make_reasoning_text(expr)
+        reasoning_step_texts, reasoning_step_mask = make_reasoning_step_texts(expr)
+        reasoning_step_ids = [
+            self.tokenizer.encode(text, self.max_answer_len)
+            for text in reasoning_step_texts
+        ]
+        reasoning_ids = self.tokenizer.encode(reasoning_text, self.max_trace_len)
         answer_len = min(len(ex.answer) + 2, self.max_answer_len)
         trace_len = min(len(ex.trace) + 2, self.max_trace_len)
+        reasoning_len = min(len(reasoning_text) + 2, self.max_trace_len)
         return {
             "problem_ids": torch.tensor(problem_ids, dtype=torch.long),
             "math_ids": torch.tensor(math_ids, dtype=torch.long),
@@ -330,9 +352,14 @@ class MathDataset(Dataset):
             "trace_value_mask": torch.tensor(trace_value_mask, dtype=torch.float),
             "trace_state_values": torch.tensor(trace_state_values, dtype=torch.float),
             "trace_state_mask": torch.tensor(trace_state_mask, dtype=torch.float),
+            "reasoning_step_ids": torch.tensor(reasoning_step_ids, dtype=torch.long),
+            "reasoning_step_mask": torch.tensor(reasoning_step_mask, dtype=torch.float),
+            "reasoning_ids": torch.tensor(reasoning_ids, dtype=torch.long),
+            "reasoning_len": torch.tensor(reasoning_len, dtype=torch.long),
             "answer_value_id": torch.tensor(value_to_class(ex.answer), dtype=torch.long),
             "answer": ex.answer,
             "trace": ex.trace,
+            "reasoning": reasoning_text,
             "problem": ex.problem,
             "op_label": ex.op_label,
             "difficulty": ex.difficulty,

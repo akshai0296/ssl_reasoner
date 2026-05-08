@@ -61,6 +61,7 @@ def main() -> None:
             "pred",
             "state_conditioned",
             "value_conditioned",
+            "reasoning_sequence",
             "target",
             "trace",
             "trace_struct",
@@ -331,6 +332,37 @@ def main() -> None:
                     )
                 predictions = [tokenizer.decode(ids).strip() for ids in decoded]
                 references = batch["answer"]
+                for problem, pred, answer, op_label, split_label in zip(
+                    batch["problem"],
+                    predictions,
+                    references,
+                    batch["op_label"],
+                    batch["split_label"],
+                ):
+                    is_correct = pred == answer
+                    correct += is_correct
+                    total += 1
+                    counts = by_op.setdefault(str(op_label), [0, 0])
+                    counts[0] += int(is_correct)
+                    counts[1] += 1
+                    split_counts = by_split.setdefault(str(split_label), [0, 0])
+                    split_counts[0] += int(is_correct)
+                    split_counts[1] += 1
+                    if shown < 10:
+                        mark = "ok" if is_correct else "bad"
+                        print(f"{mark}: {problem} -> pred={pred!r} target={answer!r}")
+                        shown += 1
+                continue
+            if args.mode == "reasoning_sequence":
+                decoded = model.solve_reasoning_sequence_ids(
+                    batch["problem_ids"].to(device),
+                    batch["math_ids"].to(device),
+                    bos_id=tokenizer.bos_id,
+                    eos_id=tokenizer.eos_id,
+                    pad_id=tokenizer.pad_id,
+                )
+                predictions = [tokenizer.decode(ids).strip() for ids in decoded]
+                references = batch["reasoning"]
                 for problem, pred, answer, op_label, split_label in zip(
                     batch["problem"],
                     predictions,

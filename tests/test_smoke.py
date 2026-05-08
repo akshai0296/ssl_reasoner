@@ -8,6 +8,8 @@ from ssl_reasoner.data import (
     generate_math_examples,
     make_trace,
     make_trace_fields,
+    make_reasoning_text,
+    make_reasoning_step_texts,
     make_trace_state_targets,
 )
 from ssl_reasoner.diagnostics import latent_health
@@ -134,6 +136,11 @@ def test_compositional_train_mixes_seen_single_and_seen_mixed():
 def test_trace_respects_multiplication_precedence():
     assert make_trace("20+1*0") == "1*0=0 20+0=20"
     assert make_trace("30+41+12") == "30+41=71 71+12=83"
+    assert make_reasoning_text("20+1*0") == "1*0=0,20+0=20,20"
+    assert make_reasoning_step_texts("20+1*0") == (
+        ["1*0=0", "20+0=20", "20"],
+        [1.0, 1.0, 1.0],
+    )
 
 
 def test_symbolic_candidate_texts_include_precedence_and_variants():
@@ -316,6 +323,46 @@ def test_state_conditioned_latent_forward_and_decode():
     assert slots.shape == (4, 8, 128)
     assert out["loss"].ndim == 0
     assert out["state_conditioned_pred_loss"].ndim == 0
+    assert len(decoded) == 4
+
+
+def test_reasoning_sequence_forward_and_decode():
+    tokenizer = build_math_tokenizer()
+    dataset = MathDataset(generate_math_examples(4, seed=5), tokenizer)
+    batch = [dataset[i] for i in range(4)]
+    problem_ids = torch.stack([item["problem_ids"] for item in batch])
+    math_ids = torch.stack([item["math_ids"] for item in batch])
+    reasoning_step_ids = torch.stack([item["reasoning_step_ids"] for item in batch])
+    reasoning_step_mask = torch.stack([item["reasoning_step_mask"] for item in batch])
+    reasoning_ids = torch.stack([item["reasoning_ids"] for item in batch])
+    reasoning_len = torch.stack([item["reasoning_len"] for item in batch])
+
+    model = MathJEPAReadout(
+        vocab_size=tokenizer.vocab_size,
+        predictor_type="cross_attn",
+        use_math_features=True,
+        use_reasoning_trace=True,
+    )
+    slots = model.predict_reasoning_state_slots(problem_ids, math_ids)
+    out = model.reasoning_sequence_loss(
+        problem_ids,
+        math_ids,
+        reasoning_step_ids,
+        reasoning_step_mask,
+        reasoning_ids,
+        reasoning_len,
+    )
+    decoded = model.solve_reasoning_sequence_ids(
+        problem_ids,
+        math_ids,
+        bos_id=tokenizer.bos_id,
+        eos_id=tokenizer.eos_id,
+        pad_id=tokenizer.pad_id,
+    )
+
+    assert slots.shape == (4, 3, 8, 128)
+    assert out["loss"].ndim == 0
+    assert out["reasoning_state_latent_loss"].ndim == 0
     assert len(decoded) == 4
 
 

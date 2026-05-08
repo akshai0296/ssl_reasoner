@@ -227,6 +227,27 @@ def evaluate_step_state_final(model, dataset, device, batch_size: int) -> float:
 
 
 @torch.no_grad()
+def evaluate_reasoning_sequence(model, dataset, tokenizer, device, batch_size: int) -> float:
+    model.eval()
+    loader = DataLoader(dataset, batch_size=batch_size)
+    correct = 0
+    total = 0
+    for batch in loader:
+        decoded_ids = model.solve_reasoning_sequence_ids(
+            batch["problem_ids"].to(device),
+            batch["math_ids"].to(device),
+            bos_id=tokenizer.bos_id,
+            eos_id=tokenizer.eos_id,
+            pad_id=tokenizer.pad_id,
+        )
+        predictions = [tokenizer.decode(ids).strip() for ids in decoded_ids]
+        for pred, reasoning in zip(predictions, batch["reasoning"]):
+            correct += int(pred == reasoning)
+            total += 1
+    return correct / max(total, 1)
+
+
+@torch.no_grad()
 def format_samples(
     model,
     dataset,
@@ -312,6 +333,10 @@ def run_stage(
             trace_value_mask = batch["trace_value_mask"].to(device)
             trace_state_values = batch["trace_state_values"].to(device)
             trace_state_mask = batch["trace_state_mask"].to(device)
+            reasoning_step_ids = batch["reasoning_step_ids"].to(device)
+            reasoning_step_mask = batch["reasoning_step_mask"].to(device)
+            reasoning_ids = batch["reasoning_ids"].to(device)
+            reasoning_len = batch["reasoning_len"].to(device)
             answer_value_id = batch["answer_value_id"].to(device)
 
             if name == "stage0_target_warmup":
@@ -456,6 +481,19 @@ def run_stage(
                         else 0.0
                     ),
                 )
+            elif name == "reasoning_sequence":
+                out = model.reasoning_sequence_loss(
+                    problem_ids,
+                    math_ids,
+                    reasoning_step_ids,
+                    reasoning_step_mask,
+                    reasoning_ids,
+                    reasoning_len,
+                    trace_op_ids,
+                    trace_value_ids,
+                    trace_value_mask,
+                    answer_value_id,
+                )
             elif name == "answer_value_head":
                 with torch.no_grad():
                     slots = model.predict_answer_slots(problem_ids, math_ids)
@@ -567,6 +605,7 @@ def run_stage(
                     "state_conditioned_joint",
                     "value_conditioned_latent",
                     "value_conditioned_joint",
+                    "reasoning_sequence",
                     "answer_value_head",
                 }:
                     diag = latent_health(model, val_dataset, device, batch_size)
@@ -586,6 +625,10 @@ def run_stage(
                     if name in {"state_conditioned_latent", "state_conditioned_joint"}
                     else value_conditioned_acc
                     if name in {"value_conditioned_latent", "value_conditioned_joint"}
+                    else evaluate_reasoning_sequence(
+                        model, val_dataset, tokenizer, device, batch_size
+                    )
+                    if name == "reasoning_sequence"
                     else pred_acc
                 )
                 if selection_acc > best_acc:
@@ -609,6 +652,7 @@ def main() -> None:
     parser.add_argument("--trace-ops-head-steps", type=int, default=None)
     parser.add_argument("--answer-value-head-steps", type=int, default=None)
     parser.add_argument("--state-conditioned-steps", type=int, default=None)
+    parser.add_argument("--reasoning-sequence-steps", type=int, default=None)
     parser.add_argument("--state-conditioned-readout-weight", type=float, default=1.0)
     parser.add_argument("--train-size", type=int, default=5000)
     parser.add_argument("--val-size", type=int, default=500)
@@ -712,6 +756,7 @@ def main() -> None:
         args.trace_ops_head_steps = args.trace_ops_head_steps or 500
         args.answer_value_head_steps = args.answer_value_head_steps or 500
         args.state_conditioned_steps = args.state_conditioned_steps or 800
+        args.reasoning_sequence_steps = args.reasoning_sequence_steps or 2000
 
     torch.manual_seed(args.seed)
     device = _device(args.device)
@@ -1173,6 +1218,33 @@ def main() -> None:
             device=device,
             optimizer=optimizer,
             steps=args.state_conditioned_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
+
+    if "reasoning_sequence" in requested_stages or "rs" in requested_stages:
+        for module in model.children():
+            _set_trainable(module, False)
+        _set_trainable(model.reasoning_sequence_projector, True)
+        _set_trainable(model.reasoning_sequence_readout, True)
+        _set_trainable(model.reasoning_sequence_struct_head, True)
+        params = list(model.reasoning_sequence_projector.parameters())
+        params += list(model.reasoning_sequence_readout.parameters())
+        params += list(model.reasoning_sequence_struct_head.parameters())
+        optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.01)
+        best_acc = run_stage(
+            name="reasoning_sequence",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.reasoning_sequence_steps,
             batch_size=args.batch_size,
             eval_every=args.eval_every,
             sample_count=args.sample_count,
