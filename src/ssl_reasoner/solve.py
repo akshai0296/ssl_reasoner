@@ -2,9 +2,72 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from dataclasses import asdict
 
+import torch
+
+from .data import encode_math_features
 from .solver import _device, load_math_solver, solve_problem_texts
+
+
+TRACE_STEP_RE = re.compile(r"^(-?\d+)([+\-*])(-?\d+)=(-?\d+)$")
+
+
+def trace_final_value(trace: str) -> int | None:
+    parts = [part for part in trace.split(",") if part]
+    if not parts:
+        return None
+    try:
+        return int(parts[-1])
+    except ValueError:
+        return None
+
+
+def trace_step_dicts(trace: str) -> list[dict[str, int | str]]:
+    steps = []
+    for part in [part for part in trace.split(",") if part][:-1]:
+        match = TRACE_STEP_RE.match(part)
+        if match is None:
+            continue
+        steps.append(
+            {
+                "lhs": int(match.group(1)),
+                "op": match.group(2),
+                "rhs": int(match.group(3)),
+                "result": int(match.group(4)),
+            }
+        )
+    return steps
+
+
+@torch.no_grad()
+def solve_variable_debug(model, problems: list[str], train_args: dict, device: torch.device) -> list[dict]:
+    max_math_len = train_args.get("max_math_len", 8)
+    math_ids = torch.tensor(
+        [encode_math_features(problem, max_math_len) for problem in problems],
+        dtype=torch.long,
+        device=device,
+    )
+    traces = model.solve_variable_reasoning_texts(
+        math_ids,
+        constrain_to_legal=True,
+        learned_values=True,
+    )
+    rows = []
+    for problem, trace in zip(problems, traces):
+        final = trace_final_value(trace)
+        rows.append(
+            {
+                "answer": None if final is None else str(final),
+                "mode": "variable_reasoner",
+                "problem": problem,
+                "reasoning_steps": trace_step_dicts(trace),
+                "reasoning_final": final,
+                "reasoning_trace": trace,
+            }
+        )
+    return rows
 
 
 def main() -> None:
@@ -24,12 +87,27 @@ def main() -> None:
 
     device = _device(args.device)
     model, tokenizer, train_args = load_math_solver(args.checkpoint, device)
-    if args.debug_reasoning and not train_args.get("_checkpoint_has_step_state_head", False):
-        raise SystemExit(
-            "--debug-reasoning requires a checkpoint with a trained step_state_head. "
-            "Use CHECKPOINT=checkpoints/step_state_solver_mixed_only/best.pt or "
-            "CHECKPOINT=checkpoints/reasoning_sequence/best.pt."
-        )
+    use_variable_debug = args.debug_reasoning and "variable_reasoner" in args.checkpoint
+    if use_variable_debug or (
+        args.debug_reasoning and not train_args.get("_checkpoint_has_step_state_head", False)
+    ):
+        rows = solve_variable_debug(model, args.problems, train_args, device)
+        if args.json:
+            print(json.dumps(rows, indent=2))
+            return
+        for row in rows:
+            print(f"answer: {row['answer']}")
+            print(f"mode: {row['mode']}")
+            print(f"problem: {row['problem']}")
+            for idx, step in enumerate(row["reasoning_steps"], start=1):
+                print(
+                    f"step{idx}: lhs={step['lhs']} op={step['op']} "
+                    f"rhs={step['rhs']} result={step['result']}"
+                )
+            print(f"final: {row['reasoning_final']}")
+            print(f"trace: {row['reasoning_trace']}")
+            print()
+        return
     results = solve_problem_texts(
         model,
         tokenizer,
