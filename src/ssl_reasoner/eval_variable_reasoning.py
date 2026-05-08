@@ -25,6 +25,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--dump-errors", type=int, default=10)
     parser.add_argument("--learned", action="store_true")
+    parser.add_argument("--unconstrained", action="store_true")
     args = parser.parse_args()
 
     device = _device(args.device)
@@ -58,7 +59,10 @@ def main() -> None:
         learned_traces = []
         for start in range(0, len(examples), args.batch_size):
             learned_traces.extend(
-                model.solve_variable_reasoning_texts(all_math_ids[start : start + args.batch_size])
+                model.solve_variable_reasoning_texts(
+                    all_math_ids[start : start + args.batch_size],
+                    constrain_to_legal=not args.unconstrained,
+                )
             )
 
     for idx, (example, result) in enumerate(zip(examples, results)):

@@ -1841,12 +1841,16 @@ class MathJEPAReadout(nn.Module):
     def solve_variable_reasoning_texts(
         self,
         math_ids: torch.Tensor,
+        constrain_to_legal: bool = True,
     ) -> list[str]:
         out = self.variable_structured_reasoner(math_ids)
-        position_rows = out["position_logits"].argmax(dim=-1).detach().cpu().tolist()
+        position_logits_rows = out["position_logits"].detach().cpu().tolist()
+        legal_rows = out["position_logits"].sigmoid().ge(0.5).detach().cpu().tolist()
         math_rows = math_ids.detach().cpu().tolist()
         traces = []
-        for math_row, position_row in zip(math_rows, position_rows):
+        for math_row, position_logit_row, legal_row in zip(
+            math_rows, position_logits_rows, legal_rows
+        ):
             values = [
                 self._math_value(math_row[idx])
                 for idx in range(0, len(math_row), 2)
@@ -1859,10 +1863,21 @@ class MathJEPAReadout(nn.Module):
             ]
             parts = []
             final = None
-            for predicted_position in position_row[: len(ops)]:
+            for step_idx in range(len(ops)):
                 if not ops:
                     break
-                position = min(max(int(predicted_position), 0), len(ops) - 1)
+                step_logits = position_logit_row[step_idx][: len(ops)]
+                if constrain_to_legal:
+                    legal_positions = [
+                        idx for idx, is_legal in enumerate(legal_row[step_idx][: len(ops)])
+                        if is_legal
+                    ]
+                    if legal_positions:
+                        position = max(legal_positions, key=lambda idx: step_logits[idx])
+                    else:
+                        position = max(range(len(step_logits)), key=lambda idx: step_logits[idx])
+                else:
+                    position = max(range(len(step_logits)), key=lambda idx: step_logits[idx])
                 lhs = values[position]
                 rhs = values[position + 1]
                 op_id = ops[position]
