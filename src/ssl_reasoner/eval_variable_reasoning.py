@@ -10,6 +10,7 @@ from .data import (
     extract_math_expression,
     generate_math_examples,
     make_reasoning_text,
+    make_variable_trace_fields,
 )
 from .solver import _device, load_math_solver, solve_problem_texts
 
@@ -67,6 +68,16 @@ def trace_is_equivalent(expr: str, trace: str) -> bool:
     return final == values[0] == int(eval(expr))
 
 
+def trace_final_value(trace: str) -> int | None:
+    parts = [part for part in trace.split(",") if part]
+    if not parts:
+        return None
+    try:
+        return int(parts[-1])
+    except ValueError:
+        return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -79,6 +90,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--dump-errors", type=int, default=10)
     parser.add_argument("--learned", action="store_true")
+    parser.add_argument("--learned-values", action="store_true")
     parser.add_argument("--unconstrained", action="store_true")
     args = parser.parse_args()
 
@@ -102,8 +114,12 @@ def main() -> None:
     answer_correct = 0
     trace_correct = 0
     trace_equiv_correct = 0
+    learned_step_value_correct = 0
+    learned_step_value_total = 0
+    learned_final_value_correct = 0
     shown = 0
     learned_traces: list[str] | None = None
+    learned_value_rows: list[list[list[int]]] | None = None
     if args.learned:
         max_math_len = train_args.get("max_math_len", 8)
         all_math_ids = torch.tensor(
@@ -112,13 +128,25 @@ def main() -> None:
             device=device,
         )
         learned_traces = []
+        learned_value_rows = []
         for start in range(0, len(examples), args.batch_size):
+            batch_math_ids = all_math_ids[start : start + args.batch_size]
             learned_traces.extend(
                 model.solve_variable_reasoning_texts(
-                    all_math_ids[start : start + args.batch_size],
+                    batch_math_ids,
                     constrain_to_legal=not args.unconstrained,
+                    learned_values=args.learned_values,
                 )
             )
+            if args.learned_values:
+                learned_value_rows.extend(
+                    model.variable_structured_reasoner(batch_math_ids)["values"]
+                    .round()
+                    .to(torch.long)
+                    .detach()
+                    .cpu()
+                    .tolist()
+                )
 
     for idx, (example, result) in enumerate(zip(examples, results)):
         expr = extract_math_expression(example.problem)
@@ -130,6 +158,21 @@ def main() -> None:
         answer_correct += int(answer_ok)
         trace_correct += int(trace_ok)
         trace_equiv_correct += int(trace_equiv_ok)
+        if args.learned_values and learned_value_rows is not None:
+            _, _, target_values, _, target_mask = make_variable_trace_fields(expr)
+            for pred_values, expected_values, is_active in zip(
+                learned_value_rows[idx],
+                target_values,
+                target_mask,
+            ):
+                if not is_active:
+                    continue
+                learned_step_value_total += 3
+                learned_step_value_correct += sum(
+                    int(pred == round(expected))
+                    for pred, expected in zip(pred_values, expected_values)
+                )
+            learned_final_value_correct += int(trace_final_value(pred_trace) == int(example.answer))
         if (not answer_ok or not trace_equiv_ok) and shown < args.dump_errors:
             print(
                 f"bad: {example.problem} -> answer={result.answer!r}/{example.answer!r} "
@@ -144,6 +187,18 @@ def main() -> None:
         f"variable_reasoning_trace_equiv_exact="
         f"{trace_equiv_correct / total:.3f} ({trace_equiv_correct}/{total})"
     )
+    if args.learned_values:
+        value_total = max(learned_step_value_total, 1)
+        print(
+            f"variable_reasoning_learned_step_value_exact="
+            f"{learned_step_value_correct / value_total:.3f} "
+            f"({learned_step_value_correct}/{learned_step_value_total})"
+        )
+        print(
+            f"variable_reasoning_learned_final_value_exact="
+            f"{learned_final_value_correct / total:.3f} "
+            f"({learned_final_value_correct}/{total})"
+        )
 
 
 if __name__ == "__main__":

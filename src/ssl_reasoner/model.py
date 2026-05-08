@@ -1910,9 +1910,20 @@ class MathJEPAReadout(nn.Module):
         self,
         math_ids: torch.Tensor,
         constrain_to_legal: bool = True,
+        learned_values: bool = False,
     ) -> list[str]:
         math_rows = math_ids.detach().cpu().tolist()
         hidden_rows = self.variable_structured_reasoner.initial_hidden(math_ids)
+        learned_value_rows = None
+        if learned_values:
+            learned_value_rows = (
+                self.variable_structured_reasoner(math_ids)["values"]
+                .round()
+                .to(torch.long)
+                .detach()
+                .cpu()
+                .tolist()
+            )
         traces = []
         for row_idx, math_row in enumerate(math_rows):
             values = [
@@ -1957,6 +1968,8 @@ class MathJEPAReadout(nn.Module):
                     result = lhs * rhs
                 else:
                     break
+                if learned_value_rows is not None:
+                    lhs, rhs, result = learned_value_rows[row_idx][step_idx]
                 op = self._trace_op_to_text(op_id)
                 parts.append(f"{lhs}{op}{rhs}={result}")
                 final = result

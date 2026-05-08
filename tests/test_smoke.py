@@ -15,7 +15,7 @@ from ssl_reasoner.data import (
     make_trace_state_targets,
 )
 from ssl_reasoner.diagnostics import latent_health
-from ssl_reasoner.eval_variable_reasoning import trace_is_equivalent
+from ssl_reasoner.eval_variable_reasoning import trace_final_value, trace_is_equivalent
 from ssl_reasoner.model import LatentVerifier, MathJEPAReadout
 from ssl_reasoner.solver import solve_problem_texts, trace_final_value_index
 from ssl_reasoner.tokenizer import build_math_tokenizer
@@ -197,6 +197,8 @@ def test_variable_trace_equivalence_accepts_valid_alternate_orders():
         "10-3-2",
         "3-2=1,10-1=9,9",
     )
+    assert trace_final_value("3*4=12,2+12=14,14-1=13,13") == 13
+    assert trace_final_value("") is None
 
 
 def test_symbolic_candidate_texts_include_precedence_and_variants():

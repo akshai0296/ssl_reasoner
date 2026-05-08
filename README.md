@@ -309,6 +309,8 @@ A first learned recurrent transition baseline is also available:
 bash scripts/train_variable_reasoner.sh
 CHECKPOINT=checkpoints/variable_reasoner/best.pt \
   bash scripts/eval_variable_reasoning.sh --learned
+CHECKPOINT=checkpoints/variable_reasoner/best.pt \
+  bash scripts/eval_variable_reasoning.sh --learned --learned-values
 ```
 
 Current learned baseline result:
@@ -318,6 +320,8 @@ Current learned baseline result:
 | answer exact | `1.000` |
 | learned trace exact | `0.812` |
 | learned trace equivalent exact | `1.000` |
+| learned step value exact | `0.010` |
+| learned final value exact | `0.000` |
 
 The answer remains exact because the solver still uses the parser fallback for final
 answers on longer expressions. The learned recurrent trace head now predicts which
@@ -325,7 +329,9 @@ adjacent operation to reduce next with a dynamic pointer over the currently rema
 operators, then an exact transition cell executes `+`, `-`, or `*`. It also receives
 legal-position supervision for precedence. The strict trace metric requires the canonical
 target order; the equivalent trace metric replays the predicted reductions and accepts
-valid alternate orders that still reach the same final answer.
+valid alternate orders that still reach the same final answer. The `--learned-values`
+eval disables exact arithmetic rendering and uses the model's predicted `lhs/rhs/result`
+triples; this exposes the current transition-value bottleneck.
 
 ## Smoke Train
 
