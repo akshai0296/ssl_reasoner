@@ -48,6 +48,7 @@ def solve_variable_debug(
     train_args: dict,
     device: torch.device,
     constrain_to_legal: bool = True,
+    value_mode: str = "candidate",
 ) -> list[dict]:
     max_math_len = train_args.get("max_math_len", 8)
     math_ids = torch.tensor(
@@ -58,7 +59,10 @@ def solve_variable_debug(
     traces = model.solve_variable_reasoning_texts(
         math_ids,
         constrain_to_legal=constrain_to_legal,
-        learned_values=True,
+        learned_values=value_mode == "candidate",
+        raw_learned_values=value_mode == "raw",
+        digit_learned_values=value_mode == "digit",
+        class_learned_values=value_mode == "class",
     )
     rows = []
     for problem, trace in zip(problems, traces):
@@ -96,6 +100,11 @@ def main() -> None:
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--debug-reasoning", action="store_true")
     parser.add_argument("--unconstrained", action="store_true")
+    parser.add_argument(
+        "--value-mode",
+        choices=["candidate", "raw", "digit", "class"],
+        default="candidate",
+    )
     parser.add_argument("problems", nargs="+")
     args = parser.parse_args()
 
@@ -111,6 +120,7 @@ def main() -> None:
             train_args,
             device,
             constrain_to_legal=not args.unconstrained,
+            value_mode=args.value_mode,
         )
         if args.json:
             print(json.dumps(rows, indent=2))

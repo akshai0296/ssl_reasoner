@@ -660,6 +660,37 @@ def test_variable_reasoner_has_raw_value_head():
     assert out["loss"].ndim == 0
     assert out["variable_raw_value_loss"].ndim == 0
     assert out["variable_raw_value_acc"].ndim == 0
+    assert out["variable_digit_sign_loss"].ndim == 0
+    assert out["variable_digit_value_loss"].ndim == 0
+    assert out["variable_digit_value_acc"].ndim == 0
+    assert out["variable_class_value_loss"].ndim == 0
+    assert out["variable_class_value_acc"].ndim == 0
+
+
+def test_variable_reasoner_digit_value_round_trip():
+    values = torch.tensor([-91.0, 0.0, 22.0, 4127.0])
+    sign, digits = MathJEPAReadout(
+        vocab_size=build_math_tokenizer().vocab_size,
+        max_variable_steps=4,
+    ).variable_structured_reasoner.value_to_sign_digits(values)
+    decoded = MathJEPAReadout(
+        vocab_size=build_math_tokenizer().vocab_size,
+        max_variable_steps=4,
+    ).variable_structured_reasoner.sign_digits_to_value(sign, digits)
+
+    assert decoded.tolist() == [-91, 0, 22, 4127]
+
+
+def test_variable_reasoner_class_value_round_trip():
+    values = torch.tensor([-91.0, 0.0, 22.0, 4127.0])
+    reasoner = MathJEPAReadout(
+        vocab_size=build_math_tokenizer().vocab_size,
+        max_variable_steps=4,
+    ).variable_structured_reasoner
+    class_ids = reasoner.value_to_transition_class(values)
+    decoded = reasoner.transition_class_to_value(class_ids)
+
+    assert decoded.tolist() == [-91, 0, 22, 4127]
 
 
 def test_latent_verifier_forward():

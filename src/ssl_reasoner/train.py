@@ -553,7 +553,12 @@ def run_stage(
                     trace_state_mask,
                     trace_op_ids,
                 )
-            elif name in {"variable_reasoner", "variable_raw_value_head"}:
+            elif name in {
+                "variable_reasoner",
+                "variable_raw_value_head",
+                "variable_digit_value_head",
+                "variable_class_value_head",
+            }:
                 out = model.variable_reasoning_loss(
                     math_ids,
                     variable_trace_op_ids,
@@ -664,7 +669,11 @@ def run_stage(
                         batch_size,
                         constrain_to_legal=False,
                     )
-                    if name in {"variable_reasoner", "variable_raw_value_head"}
+                    if name in {
+                        "variable_reasoner",
+                        "variable_raw_value_head",
+                        "variable_digit_value_head",
+                    }
                     else 0.0
                 )
                 metrics = " ".join(
@@ -688,6 +697,8 @@ def run_stage(
                         "variable_legal_acc",
                         "variable_value_acc",
                         "variable_raw_value_acc",
+                        "variable_digit_value_acc",
+                        "variable_class_value_acc",
                     }
                 )
                 print(
@@ -727,6 +738,8 @@ def run_stage(
                     "step_state_head",
                     "variable_reasoner",
                     "variable_raw_value_head",
+                    "variable_digit_value_head",
+                    "variable_class_value_head",
                     "state_conditioned_latent",
                     "state_conditioned_joint",
                     "value_conditioned_latent",
@@ -755,6 +768,12 @@ def run_stage(
                         model, val_dataset, tokenizer, device, batch_size
                     )
                     if name == "reasoning_sequence"
+                    else variable_unconstrained_trace_acc
+                    + 0.001 * float(out.get("variable_class_value_acc", torch.tensor(0.0)).item())
+                    if name == "variable_class_value_head"
+                    else variable_unconstrained_trace_acc
+                    + 0.001 * float(out.get("variable_digit_value_acc", torch.tensor(0.0)).item())
+                    if name == "variable_digit_value_head"
                     else variable_unconstrained_trace_acc
                     + 0.001 * float(out.get("variable_raw_value_acc", torch.tensor(0.0)).item())
                     if name == "variable_raw_value_head"
@@ -1297,6 +1316,58 @@ def main() -> None:
         )
         best_acc = run_stage(
             name="variable_raw_value_head",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.variable_reasoner_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
+
+    if "variable_digit_value_head" in requested_stages or "vdh" in requested_stages:
+        for module in model.children():
+            _set_trainable(module, False)
+        _set_trainable(model.variable_structured_reasoner.digit_result_head, True)
+        optimizer = torch.optim.AdamW(
+            model.variable_structured_reasoner.digit_result_head.parameters(),
+            lr=args.lr,
+            weight_decay=0.01,
+        )
+        best_acc = run_stage(
+            name="variable_digit_value_head",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.variable_reasoner_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
+
+    if "variable_class_value_head" in requested_stages or "vch" in requested_stages:
+        for module in model.children():
+            _set_trainable(module, False)
+        _set_trainable(model.variable_structured_reasoner.class_result_head, True)
+        optimizer = torch.optim.AdamW(
+            model.variable_structured_reasoner.class_result_head.parameters(),
+            lr=args.lr,
+            weight_decay=0.01,
+        )
+        best_acc = run_stage(
+            name="variable_class_value_head",
             model=model,
             loader=loader,
             val_dataset=val_dataset,

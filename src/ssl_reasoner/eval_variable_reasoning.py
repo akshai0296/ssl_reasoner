@@ -201,7 +201,13 @@ def evaluate_preset(
     learned_final_value_correct = 0
     shown = 0
     learned_traces: list[str] | None = None
-    if args.learned or args.learned_values or args.raw_learned_values:
+    if (
+        args.learned
+        or args.learned_values
+        or args.raw_learned_values
+        or args.digit_learned_values
+        or args.class_learned_values
+    ):
         max_math_len = train_args.get("max_math_len", 8)
         all_math_ids = torch.tensor(
             [encode_math_features(example.problem, max_math_len) for example in examples],
@@ -217,6 +223,8 @@ def evaluate_preset(
                     constrain_to_legal=not args.unconstrained,
                     learned_values=args.learned_values,
                     raw_learned_values=args.raw_learned_values,
+                    digit_learned_values=args.digit_learned_values,
+                    class_learned_values=args.class_learned_values,
                 )
             )
 
@@ -296,6 +304,8 @@ def evaluate_problem(
         constrain_to_legal=not args.unconstrained,
         learned_values=args.learned_values,
         raw_learned_values=args.raw_learned_values,
+        digit_learned_values=args.digit_learned_values,
+        class_learned_values=args.class_learned_values,
     )
     pred_trace = traces[0]
     final = trace_final_value(pred_trace)
@@ -336,6 +346,8 @@ def main() -> None:
     parser.add_argument("--learned", action="store_true")
     parser.add_argument("--learned-values", action="store_true")
     parser.add_argument("--raw-learned-values", action="store_true")
+    parser.add_argument("--digit-learned-values", action="store_true")
+    parser.add_argument("--class-learned-values", action="store_true")
     parser.add_argument("--unconstrained", action="store_true")
     args = parser.parse_args()
 

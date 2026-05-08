@@ -417,6 +417,42 @@ Current result: the raw regression loss trains, but exact arithmetic remains nea
 The candidate-scored learned-value path is still the working path for exact results. This
 keeps the raw path measurable without pretending it has solved learned arithmetic.
 
+Two sharper transition-head baselines are now available for the "learn single-step
+arithmetic first" direction:
+
+```bash
+bash scripts/train_variable_digit_value_head.sh
+bash scripts/train_variable_class_value_head.sh
+```
+
+The digit head predicts sign plus fixed decimal digits. The class head predicts a bounded
+integer class from `-1000` to `10000`. Both can be used in variable-reasoning eval:
+
+```bash
+PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
+  --checkpoint checkpoints/variable_digit_value_head_single/best.pt \
+  --digit-learned-values \
+  --preset in_dist
+
+PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
+  --checkpoint checkpoints/variable_class_value_head_single/best.pt \
+  --class-learned-values \
+  --preset in_dist
+```
+
+Measured single-step answer exact on 500 generated `single_op_balanced` examples:
+
+| Transition path | Single-step exact |
+| --- | ---: |
+| candidate-scored value head | `0.978` |
+| digit value head | `0.062` |
+| bounded class value head | `0.298` |
+
+The class head is the better raw learned baseline, but it is not yet strong enough to
+replace candidate scoring. The next raw-arithmetic improvement should train a stronger
+transition encoder directly on `(lhs, op, rhs) -> result`, not only as a small head on top
+of the existing variable-reasoner hidden state.
+
 ## Smoke Train
 
 ```bash

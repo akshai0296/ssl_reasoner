@@ -15,6 +15,10 @@ TRACE_STATE_SCALE = 100.0
 VARIABLE_REASONING_SCALE = 100.0
 RAW_VARIABLE_VALUE_LOSS_WEIGHT = 0.01
 MAX_VARIABLE_REASONING_STEPS = 16
+TRANSITION_DIGITS = 5
+TRANSITION_VALUE_MIN = -1000
+TRANSITION_VALUE_MAX = 10000
+TRANSITION_VALUE_CLASSES = TRANSITION_VALUE_MAX - TRANSITION_VALUE_MIN + 1
 MATH_FEATURE_NUM_OFFSET = 1
 MATH_FEATURE_PLUS_ID = 202
 MATH_FEATURE_MINUS_ID = 203
@@ -474,6 +478,18 @@ class VariableStructuredReasoner(nn.Module):
             nn.GELU(),
             nn.Linear(d_model, 1),
         )
+        self.digit_result_head = nn.Sequential(
+            nn.LayerNorm(d_model + 5),
+            nn.Linear(d_model + 5, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, 2 + TRANSITION_DIGITS * 10),
+        )
+        self.class_result_head = nn.Sequential(
+            nn.LayerNorm(d_model + 5),
+            nn.Linear(d_model + 5, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, TRANSITION_VALUE_CLASSES),
+        )
 
     def pointer_logits_for_ops(
         self,
@@ -575,6 +591,82 @@ class VariableStructuredReasoner(nn.Module):
         return self.raw_result_head(features).squeeze(-1) * VARIABLE_REASONING_SCALE
 
     @staticmethod
+    def value_to_sign_digits(values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        rounded = values.round().long()
+        sign = rounded.lt(0).long()
+        magnitude = rounded.abs().clamp(max=(10 ** TRANSITION_DIGITS) - 1)
+        digits = []
+        for place in reversed(range(TRANSITION_DIGITS)):
+            divisor = 10 ** place
+            digits.append((magnitude // divisor) % 10)
+        return sign, torch.stack(digits, dim=-1)
+
+    @staticmethod
+    def sign_digits_to_value(sign_ids: torch.Tensor, digit_ids: torch.Tensor) -> torch.Tensor:
+        multipliers = torch.tensor(
+            [10 ** place for place in reversed(range(TRANSITION_DIGITS))],
+            device=digit_ids.device,
+            dtype=torch.long,
+        )
+        magnitude = (digit_ids.long() * multipliers).sum(dim=-1)
+        return torch.where(sign_ids.long().eq(1), -magnitude, magnitude)
+
+    def digit_logits_for_values(
+        self,
+        hidden: torch.Tensor,
+        lhs: torch.Tensor,
+        rhs: torch.Tensor,
+        op_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        logits = self.digit_result_head(self._transition_features(hidden, lhs, rhs, op_ids))
+        sign_logits = logits[:, :2]
+        digit_logits = logits[:, 2:].view(-1, TRANSITION_DIGITS, 10)
+        return sign_logits, digit_logits
+
+    def digit_result_for_values(
+        self,
+        hidden: torch.Tensor,
+        lhs: torch.Tensor,
+        rhs: torch.Tensor,
+        op_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        sign_logits, digit_logits = self.digit_logits_for_values(hidden, lhs, rhs, op_ids)
+        return self.sign_digits_to_value(
+            sign_logits.argmax(dim=-1),
+            digit_logits.argmax(dim=-1),
+        )
+
+    @staticmethod
+    def value_to_transition_class(values: torch.Tensor) -> torch.Tensor:
+        return values.round().long().clamp(
+            min=TRANSITION_VALUE_MIN,
+            max=TRANSITION_VALUE_MAX,
+        ) - TRANSITION_VALUE_MIN
+
+    @staticmethod
+    def transition_class_to_value(class_ids: torch.Tensor) -> torch.Tensor:
+        return class_ids.long() + TRANSITION_VALUE_MIN
+
+    def class_logits_for_values(
+        self,
+        hidden: torch.Tensor,
+        lhs: torch.Tensor,
+        rhs: torch.Tensor,
+        op_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.class_result_head(self._transition_features(hidden, lhs, rhs, op_ids))
+
+    def class_result_for_values(
+        self,
+        hidden: torch.Tensor,
+        lhs: torch.Tensor,
+        rhs: torch.Tensor,
+        op_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        logits = self.class_logits_for_values(hidden, lhs, rhs, op_ids)
+        return self.transition_class_to_value(logits.argmax(dim=-1))
+
+    @staticmethod
     def arithmetic_candidates(lhs: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
         return torch.stack([lhs + rhs, lhs - rhs, lhs * rhs], dim=-1)
 
@@ -671,6 +763,49 @@ class VariableStructuredReasoner(nn.Module):
         raw_value_loss = (
             raw_value_loss * step_mask
         ).sum() / step_mask.sum().clamp(min=1.0)
+        sign_logits, digit_logits = self.digit_logits_for_values(
+            out["states"].reshape(-1, out["states"].size(-1)),
+            value_targets[:, :, 0].reshape(-1),
+            value_targets[:, :, 1].reshape(-1),
+            op_targets.reshape(-1),
+        )
+        sign_targets, digit_targets = self.value_to_sign_digits(
+            value_targets[:, :, 2].reshape(-1)
+        )
+        flat_mask = step_mask.reshape(-1)
+        digit_sign_loss = F.cross_entropy(
+            sign_logits,
+            sign_targets,
+            reduction="none",
+        )
+        digit_sign_loss = (
+            digit_sign_loss * flat_mask
+        ).sum() / flat_mask.sum().clamp(min=1.0)
+        per_digit_loss = F.cross_entropy(
+            digit_logits.reshape(-1, 10),
+            digit_targets.reshape(-1),
+            reduction="none",
+        ).view(-1, TRANSITION_DIGITS)
+        digit_value_loss = (
+            per_digit_loss.mean(dim=-1) * flat_mask
+        ).sum() / flat_mask.sum().clamp(min=1.0)
+        class_logits = self.class_logits_for_values(
+            out["states"].reshape(-1, out["states"].size(-1)),
+            value_targets[:, :, 0].reshape(-1),
+            value_targets[:, :, 1].reshape(-1),
+            op_targets.reshape(-1),
+        )
+        class_targets = self.value_to_transition_class(
+            value_targets[:, :, 2].reshape(-1)
+        )
+        class_value_loss = F.cross_entropy(
+            class_logits,
+            class_targets,
+            reduction="none",
+        )
+        class_value_loss = (
+            class_value_loss * flat_mask
+        ).sum() / flat_mask.sum().clamp(min=1.0)
         active_pred = out["active_logits"].sigmoid().ge(0.5).float()
         active_acc = (active_pred == step_mask).float().mean()
         op_acc = (
@@ -707,6 +842,19 @@ class VariableStructuredReasoner(nn.Module):
         raw_value_acc = (
             (raw_values.round() == value_targets[:, :, 2].round()).float() * step_mask
         ).sum() / step_mask.sum().clamp(min=1.0)
+        digit_values = self.sign_digits_to_value(
+            sign_logits.argmax(dim=-1),
+            digit_logits.argmax(dim=-1),
+        ).view_as(step_mask)
+        digit_value_acc = (
+            (digit_values == value_targets[:, :, 2].round().long()).float() * step_mask
+        ).sum() / step_mask.sum().clamp(min=1.0)
+        class_values = self.transition_class_to_value(
+            class_logits.argmax(dim=-1)
+        ).view_as(step_mask)
+        class_value_acc = (
+            (class_values == value_targets[:, :, 2].round().long()).float() * step_mask
+        ).sum() / step_mask.sum().clamp(min=1.0)
         return {
             "loss": (
                 active_loss
@@ -716,6 +864,9 @@ class VariableStructuredReasoner(nn.Module):
                 + legal_loss
                 + value_loss
                 + RAW_VARIABLE_VALUE_LOSS_WEIGHT * raw_value_loss
+                + digit_sign_loss
+                + digit_value_loss
+                + class_value_loss
             ),
             "variable_active_loss": active_loss,
             "variable_op_loss": op_loss,
@@ -724,6 +875,9 @@ class VariableStructuredReasoner(nn.Module):
             "variable_legal_loss": legal_loss,
             "variable_value_loss": value_loss,
             "variable_raw_value_loss": raw_value_loss,
+            "variable_digit_sign_loss": digit_sign_loss,
+            "variable_digit_value_loss": digit_value_loss,
+            "variable_class_value_loss": class_value_loss,
             "variable_active_acc": active_acc,
             "variable_op_acc": op_acc,
             "variable_reduction_policy_acc": reduction_policy_acc,
@@ -731,6 +885,8 @@ class VariableStructuredReasoner(nn.Module):
             "variable_legal_acc": legal_acc,
             "variable_value_acc": value_acc,
             "variable_raw_value_acc": raw_value_acc,
+            "variable_digit_value_acc": digit_value_acc,
+            "variable_class_value_acc": class_value_acc,
         }
 
 
@@ -2027,6 +2183,8 @@ class MathJEPAReadout(nn.Module):
         constrain_to_legal: bool = True,
         learned_values: bool = False,
         raw_learned_values: bool = False,
+        digit_learned_values: bool = False,
+        class_learned_values: bool = False,
     ) -> list[str]:
         math_rows = math_ids.detach().cpu().tolist()
         hidden_rows = self.variable_structured_reasoner.initial_hidden(math_ids)
@@ -2082,7 +2240,27 @@ class MathJEPAReadout(nn.Module):
                     result = lhs * rhs
                 else:
                     break
-                if raw_learned_values:
+                if class_learned_values:
+                    lhs_tensor = torch.tensor([lhs], device=math_ids.device)
+                    rhs_tensor = torch.tensor([rhs], device=math_ids.device)
+                    class_result = self.variable_structured_reasoner.class_result_for_values(
+                        hidden,
+                        lhs_tensor,
+                        rhs_tensor,
+                        torch.tensor([op_id], device=math_ids.device),
+                    )
+                    result = int(class_result[0].item())
+                elif digit_learned_values:
+                    lhs_tensor = torch.tensor([lhs], device=math_ids.device)
+                    rhs_tensor = torch.tensor([rhs], device=math_ids.device)
+                    digit_result = self.variable_structured_reasoner.digit_result_for_values(
+                        hidden,
+                        lhs_tensor,
+                        rhs_tensor,
+                        torch.tensor([op_id], device=math_ids.device),
+                    )
+                    result = int(digit_result[0].item())
+                elif raw_learned_values:
                     lhs_tensor = torch.tensor([lhs], device=math_ids.device)
                     rhs_tensor = torch.tensor([rhs], device=math_ids.device)
                     raw_result = self.variable_structured_reasoner.raw_result_for_values(
