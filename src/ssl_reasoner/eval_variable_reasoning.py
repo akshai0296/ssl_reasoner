@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import argparse
 
-from .data import extract_math_expression, generate_math_examples, make_reasoning_text
+import torch
+
+from .data import (
+    encode_math_features,
+    extract_math_expression,
+    generate_math_examples,
+    make_reasoning_text,
+)
 from .solver import _device, load_math_solver, solve_problem_texts
 
 
@@ -17,6 +24,7 @@ def main() -> None:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--dump-errors", type=int, default=10)
+    parser.add_argument("--learned", action="store_true")
     args = parser.parse_args()
 
     device = _device(args.device)
@@ -39,16 +47,31 @@ def main() -> None:
     answer_correct = 0
     trace_correct = 0
     shown = 0
-    for example, result in zip(examples, results):
+    learned_traces: list[str] | None = None
+    if args.learned:
+        max_math_len = train_args.get("max_math_len", 8)
+        all_math_ids = torch.tensor(
+            [encode_math_features(example.problem, max_math_len) for example in examples],
+            dtype=torch.long,
+            device=device,
+        )
+        learned_traces = []
+        for start in range(0, len(examples), args.batch_size):
+            learned_traces.extend(
+                model.solve_variable_reasoning_texts(all_math_ids[start : start + args.batch_size])
+            )
+
+    for idx, (example, result) in enumerate(zip(examples, results)):
         target_trace = make_reasoning_text(extract_math_expression(example.problem))
         answer_ok = result.answer == example.answer
-        trace_ok = result.reasoning_trace == target_trace
+        pred_trace = learned_traces[idx] if learned_traces is not None else result.reasoning_trace
+        trace_ok = pred_trace == target_trace
         answer_correct += int(answer_ok)
         trace_correct += int(trace_ok)
         if (not answer_ok or not trace_ok) and shown < args.dump_errors:
             print(
                 f"bad: {example.problem} -> answer={result.answer!r}/{example.answer!r} "
-                f"trace={result.reasoning_trace!r}/{target_trace!r}"
+                f"trace={pred_trace!r}/{target_trace!r}"
             )
             shown += 1
 

@@ -300,9 +300,30 @@ Current 500-sample `multi_step` result:
 | answer exact | `1.000` |
 | trace exact | `1.000` |
 
-This variable-length path is currently structured and deterministic. It establishes the
-multi-step trace contract and eval target; the next research step is replacing the
-deterministic transition with a learned recurrent transition model.
+This variable-length path is structured and deterministic. It establishes the multi-step
+trace contract and eval target.
+
+A first learned recurrent transition baseline is also available:
+
+```bash
+bash scripts/train_variable_reasoner.sh
+CHECKPOINT=checkpoints/variable_reasoner/best.pt \
+  bash scripts/eval_variable_reasoning.sh --learned
+```
+
+Current learned baseline result:
+
+| Metric | Score |
+| --- | ---: |
+| answer exact | `1.000` |
+| learned trace exact | `0.000` |
+
+The answer remains exact because the solver still uses the parser fallback for final
+answers on longer expressions. The learned recurrent trace head currently learns active
+steps and operation choice, but direct numeric value regression is not exact enough. The
+next improvement should give the learned transition an arithmetic execution inductive
+bias, like the two-step state solver does, instead of asking an MLP to regress exact
+intermediate values.
 
 ## Smoke Train
 

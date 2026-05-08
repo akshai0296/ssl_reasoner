@@ -12,6 +12,8 @@ VALUE_CONDITIONED_MIN = -1000
 VALUE_CONDITIONED_MAX = 1200
 VALUE_CONDITIONED_CLASSES = VALUE_CONDITIONED_MAX - VALUE_CONDITIONED_MIN + 1
 TRACE_STATE_SCALE = 100.0
+VARIABLE_REASONING_SCALE = 100.0
+MAX_VARIABLE_REASONING_STEPS = 4
 MATH_FEATURE_NUM_OFFSET = 1
 MATH_FEATURE_PLUS_ID = 202
 MATH_FEATURE_MINUS_ID = 203
@@ -434,6 +436,95 @@ class StepwiseArithmeticStateHead(nn.Module):
         }
 
 
+class VariableStructuredReasoner(nn.Module):
+    def __init__(
+        self,
+        math_vocab_size: int,
+        d_model: int,
+        max_math_len: int,
+        max_steps: int = MAX_VARIABLE_REASONING_STEPS,
+    ):
+        super().__init__()
+        self.max_steps = max_steps
+        self.token_embed = nn.Embedding(math_vocab_size, d_model, padding_idx=0)
+        self.pos_embed = nn.Parameter(torch.randn(1, max_math_len, d_model) * 0.02)
+        self.input_proj = nn.Sequential(
+            nn.LayerNorm(d_model + max_math_len),
+            nn.Linear(d_model + max_math_len, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+        )
+        self.step_embed = nn.Parameter(torch.randn(max_steps, d_model) * 0.02)
+        self.cell = nn.GRUCell(d_model, d_model)
+        self.active_head = nn.Linear(d_model, 1)
+        self.op_head = nn.Linear(d_model, 4)
+        self.value_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, 3),
+        )
+
+    def forward(self, math_ids: torch.Tensor) -> dict[str, torch.Tensor]:
+        mask = math_ids.ne(0)
+        tokens = self.token_embed(math_ids) + self.pos_embed[:, : math_ids.size(1)]
+        denom = mask.sum(dim=1, keepdim=True).clamp(min=1).to(tokens.dtype)
+        pooled = (tokens * mask.unsqueeze(-1)).sum(dim=1) / denom
+        math_features = math_ids.float() / MATH_FEATURE_TIMES_ID
+        hidden = self.input_proj(torch.cat([pooled, math_features], dim=-1))
+
+        states = []
+        for step in range(self.max_steps):
+            step_input = self.step_embed[step].unsqueeze(0).expand(math_ids.size(0), -1)
+            hidden = self.cell(step_input, hidden)
+            states.append(hidden)
+        step_states = torch.stack(states, dim=1)
+        return {
+            "active_logits": self.active_head(step_states).squeeze(-1),
+            "op_logits": self.op_head(step_states),
+            "values": self.value_head(step_states) * VARIABLE_REASONING_SCALE,
+        }
+
+    def loss(
+        self,
+        math_ids: torch.Tensor,
+        op_targets: torch.Tensor,
+        value_targets: torch.Tensor,
+        step_mask: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        out = self(math_ids)
+        active_loss = F.binary_cross_entropy_with_logits(out["active_logits"], step_mask)
+        op_loss = F.cross_entropy(
+            out["op_logits"].reshape(-1, 4),
+            op_targets.reshape(-1),
+            reduction="none",
+        ).view_as(step_mask)
+        op_loss = (op_loss * step_mask).sum() / step_mask.sum().clamp(min=1.0)
+        value_loss = F.smooth_l1_loss(
+            out["values"] / VARIABLE_REASONING_SCALE,
+            value_targets / VARIABLE_REASONING_SCALE,
+            reduction="none",
+        ).mean(dim=-1)
+        value_loss = (value_loss * step_mask).sum() / step_mask.sum().clamp(min=1.0)
+        active_pred = out["active_logits"].sigmoid().ge(0.5).float()
+        active_acc = (active_pred == step_mask).float().mean()
+        op_acc = (
+            (out["op_logits"].argmax(dim=-1) == op_targets).float() * step_mask
+        ).sum() / step_mask.sum().clamp(min=1.0)
+        value_acc = (
+            (out["values"].round() == value_targets).float().mean(dim=-1) * step_mask
+        ).sum() / step_mask.sum().clamp(min=1.0)
+        return {
+            "loss": active_loss + op_loss + value_loss,
+            "variable_active_loss": active_loss,
+            "variable_op_loss": op_loss,
+            "variable_value_loss": value_loss,
+            "variable_active_acc": active_acc,
+            "variable_op_acc": op_acc,
+            "variable_value_acc": value_acc,
+        }
+
+
 class StateConditionedSlotProjector(nn.Module):
     def __init__(self, d_model: int, num_slots: int):
         super().__init__()
@@ -526,6 +617,9 @@ class MathJEPAReadout(nn.Module):
             self.math_pos_embed = nn.Parameter(torch.randn(1, max_math_len, d_model) * 0.02)
             self.math_norm = nn.LayerNorm(d_model)
         self.step_state_head = StepwiseArithmeticStateHead(
+            math_vocab_size, d_model, max_math_len
+        )
+        self.variable_structured_reasoner = VariableStructuredReasoner(
             math_vocab_size, d_model, max_math_len
         )
         self.state_conditioned_projector = StateConditionedSlotProjector(
@@ -905,6 +999,20 @@ class MathJEPAReadout(nn.Module):
             trace_state_values,
             trace_state_mask,
             trace_op_ids,
+        )
+
+    def variable_reasoning_loss(
+        self,
+        math_ids: torch.Tensor,
+        variable_trace_op_ids: torch.Tensor,
+        variable_trace_values: torch.Tensor,
+        variable_trace_mask: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        return self.variable_structured_reasoner.loss(
+            math_ids,
+            variable_trace_op_ids,
+            variable_trace_values,
+            variable_trace_mask,
         )
 
     def state_conditioned_latent_loss(
@@ -1697,6 +1805,30 @@ class MathJEPAReadout(nn.Module):
             self._render_reasoning_struct_row(op_row, value_row, bool(mixed))
             for op_row, value_row, mixed in zip(op_rows, value_rows, is_mixed)
         ]
+
+    @torch.no_grad()
+    def solve_variable_reasoning_texts(
+        self,
+        math_ids: torch.Tensor,
+    ) -> list[str]:
+        out = self.variable_structured_reasoner(math_ids)
+        op_rows = out["op_logits"].argmax(dim=-1).detach().cpu().tolist()
+        value_rows = out["values"].round().detach().cpu().tolist()
+        math_rows = math_ids.detach().cpu().tolist()
+        traces = []
+        for math_row, op_row, value_row in zip(math_rows, op_rows, value_rows):
+            step_count = sum(1 for idx in range(1, len(math_row), 2) if math_row[idx] != 0)
+            parts = []
+            final = None
+            for op_id, values in zip(op_row[:step_count], value_row[:step_count]):
+                lhs = int(values[0])
+                rhs = int(values[1])
+                result = int(values[2])
+                op = self._trace_op_to_text(int(op_id))
+                parts.append(f"{lhs}{op}{rhs}={result}")
+                final = result
+            traces.append(",".join(parts + ([str(final)] if final is not None else [])))
+        return traces
 
     @torch.no_grad()
     def predict_trace_state_values(

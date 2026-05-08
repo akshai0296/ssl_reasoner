@@ -244,6 +244,26 @@ def evaluate_reasoning_sequence(model, dataset, tokenizer, device, batch_size: i
 
 
 @torch.no_grad()
+def evaluate_variable_reasoner(model, dataset, device, batch_size: int) -> float:
+    model.eval()
+    loader = DataLoader(dataset, batch_size=batch_size)
+    correct = 0
+    total = 0
+    for batch in loader:
+        pred = model.variable_structured_reasoner(batch["math_ids"].to(device))
+        op_ids = pred["op_logits"].argmax(dim=-1)
+        values = pred["values"].round()
+        target_ops = batch["variable_trace_op_ids"].to(device)
+        target_values = batch["variable_trace_values"].to(device)
+        mask = batch["variable_trace_mask"].to(device)
+        step_ok = (op_ids == target_ops) & (values == target_values).all(dim=-1)
+        example_ok = ((step_ok.float() * mask).sum(dim=-1) == mask.sum(dim=-1)).float()
+        correct += int(example_ok.sum().item())
+        total += int(example_ok.numel())
+    return correct / max(total, 1)
+
+
+@torch.no_grad()
 def format_samples(
     model,
     dataset,
@@ -329,6 +349,9 @@ def run_stage(
             trace_value_mask = batch["trace_value_mask"].to(device)
             trace_state_values = batch["trace_state_values"].to(device)
             trace_state_mask = batch["trace_state_mask"].to(device)
+            variable_trace_op_ids = batch["variable_trace_op_ids"].to(device)
+            variable_trace_values = batch["variable_trace_values"].to(device)
+            variable_trace_mask = batch["variable_trace_mask"].to(device)
             reasoning_step_ids = batch["reasoning_step_ids"].to(device)
             reasoning_step_mask = batch["reasoning_step_mask"].to(device)
             reasoning_ids = batch["reasoning_ids"].to(device)
@@ -453,6 +476,13 @@ def run_stage(
                     trace_state_mask,
                     trace_op_ids,
                 )
+            elif name == "variable_reasoner":
+                out = model.variable_reasoning_loss(
+                    math_ids,
+                    variable_trace_op_ids,
+                    variable_trace_values,
+                    variable_trace_mask,
+                )
             elif name in {"state_conditioned_latent", "state_conditioned_joint"}:
                 out = model.state_conditioned_latent_loss(
                     problem_ids,
@@ -561,6 +591,9 @@ def run_stage(
                         "trace_state_final_acc",
                         "step_state_final_acc",
                         "answer_value_acc",
+                        "variable_active_acc",
+                        "variable_op_acc",
+                        "variable_value_acc",
                     }
                 )
                 print(
@@ -597,6 +630,7 @@ def run_stage(
                     "trace_ops_head",
                     "trace_state_head",
                     "step_state_head",
+                    "variable_reasoner",
                     "state_conditioned_latent",
                     "state_conditioned_joint",
                     "value_conditioned_latent",
@@ -625,6 +659,8 @@ def run_stage(
                         model, val_dataset, tokenizer, device, batch_size
                     )
                     if name == "reasoning_sequence"
+                    else evaluate_variable_reasoner(model, val_dataset, device, batch_size)
+                    if name == "variable_reasoner"
                     else pred_acc
                 )
                 if selection_acc > best_acc:
@@ -649,6 +685,7 @@ def main() -> None:
     parser.add_argument("--answer-value-head-steps", type=int, default=None)
     parser.add_argument("--state-conditioned-steps", type=int, default=None)
     parser.add_argument("--reasoning-sequence-steps", type=int, default=None)
+    parser.add_argument("--variable-reasoner-steps", type=int, default=None)
     parser.add_argument("--state-conditioned-readout-weight", type=float, default=1.0)
     parser.add_argument("--train-size", type=int, default=5000)
     parser.add_argument("--val-size", type=int, default=500)
@@ -753,6 +790,7 @@ def main() -> None:
         args.answer_value_head_steps = args.answer_value_head_steps or 500
         args.state_conditioned_steps = args.state_conditioned_steps or 800
         args.reasoning_sequence_steps = args.reasoning_sequence_steps or 2000
+        args.variable_reasoner_steps = args.variable_reasoner_steps or 2000
 
     torch.manual_seed(args.seed)
     device = _device(args.device)
@@ -1110,6 +1148,30 @@ def main() -> None:
             device=device,
             optimizer=optimizer,
             steps=args.trace_ops_head_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
+
+    if "variable_reasoner" in requested_stages or "vr" in requested_stages:
+        for module in model.children():
+            _set_trainable(module, False)
+        _set_trainable(model.variable_structured_reasoner, True)
+        optimizer = torch.optim.AdamW(
+            model.variable_structured_reasoner.parameters(), lr=args.lr, weight_decay=0.01
+        )
+        best_acc = run_stage(
+            name="variable_reasoner",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.variable_reasoner_steps,
             batch_size=args.batch_size,
             eval_every=args.eval_every,
             sample_count=args.sample_count,
