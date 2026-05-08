@@ -29,6 +29,10 @@ class MathSolveResult:
     operation_confidences: list[float]
     trace_state_confidence: float
     min_operation_confidence: float
+    reasoning_trace: str | None
+    reasoning_steps: list[dict[str, int | str]]
+    reasoning_final: str | None
+    reasoning_order: str | None
 
 
 def operation_confidence_count(problem: str) -> int:
@@ -84,6 +88,93 @@ def parsed_expression_answer(problem: str) -> str | None:
         else:
             return None
     return str(total)
+
+
+def _op_text(op_id: int) -> str:
+    if op_id == 1:
+        return "+"
+    if op_id == 2:
+        return "-"
+    if op_id == 3:
+        return "*"
+    return ""
+
+
+def _reasoning_step(
+    lhs: int,
+    op_id: int,
+    rhs: int,
+    result: int,
+) -> dict[str, int | str]:
+    return {
+        "lhs": lhs,
+        "op": _op_text(op_id),
+        "rhs": rhs,
+        "result": result,
+    }
+
+
+@torch.no_grad()
+def predict_structured_reasoning_details(
+    model: MathJEPAReadout,
+    math_ids: torch.Tensor,
+) -> list[dict[str, object]]:
+    empty = {
+        "trace": None,
+        "steps": [],
+        "final": None,
+        "order": None,
+    }
+    if not hasattr(model, "step_state_head"):
+        return [empty.copy() for _ in range(math_ids.size(0))]
+
+    state_out = model.step_state_head(math_ids)
+    values = state_out["values"].detach().cpu().tolist()
+    order_ids = state_out["order_logits"].argmax(dim=-1).detach().cpu().tolist()
+    math_rows = math_ids.detach().cpu().tolist()
+
+    rows: list[dict[str, object]] = []
+    for math_row, state_row, order_id in zip(math_rows, values, order_ids):
+        a = MathJEPAReadout._math_value(math_row[0])
+        op1_id = MathJEPAReadout._math_op_id(math_row[1])
+        b = MathJEPAReadout._math_value(math_row[2])
+        op2_id = MathJEPAReadout._math_op_id(math_row[3])
+        c = MathJEPAReadout._math_value(math_row[4])
+        if not op1_id:
+            rows.append(empty.copy())
+            continue
+        first = int(round(float(state_row[0])))
+        final = int(round(float(state_row[1]))) if op2_id else first
+
+        if not op2_id:
+            steps = [_reasoning_step(a, op1_id, b, first)]
+            order = "single"
+        elif int(order_id) == 1:
+            steps = [
+                _reasoning_step(b, op2_id, c, first),
+                _reasoning_step(a, op1_id, first, final),
+            ]
+            order = "right_first"
+        else:
+            steps = [
+                _reasoning_step(a, op1_id, b, first),
+                _reasoning_step(first, op2_id, c, final),
+            ]
+            order = "left_first"
+
+        rows.append(
+            {
+                "trace": MathJEPAReadout._render_step_state_row(
+                    math_row,
+                    state_row,
+                    int(order_id),
+                ),
+                "steps": steps,
+                "final": str(final),
+                "order": order,
+            }
+        )
+    return rows
 
 
 def _device(name: str) -> torch.device:
@@ -252,6 +343,7 @@ def solve_problem_texts(
             math_ids,
             batch_problems,
         )
+        reasoning_details = predict_structured_reasoning_details(model, math_ids)
 
         for (
             problem,
@@ -260,6 +352,7 @@ def solve_problem_texts(
             state_answer,
             state_confidence,
             readout_answer,
+            reasoning_detail,
         ) in zip(
             batch_problems,
             op_rows,
@@ -267,6 +360,7 @@ def solve_problem_texts(
             state_answers,
             state_confidences,
             readout_answers,
+            reasoning_details,
         ):
             operation_answer = operation_candidate_text(problem, op_row)
             parsed_answer = (
@@ -303,6 +397,22 @@ def solve_problem_texts(
                     operation_confidences=[float(conf) for conf in confidence_row],
                     trace_state_confidence=float(state_confidence),
                     min_operation_confidence=float(min_confidence),
+                    reasoning_trace=(
+                        str(reasoning_detail["trace"])
+                        if reasoning_detail["trace"] is not None
+                        else None
+                    ),
+                    reasoning_steps=list(reasoning_detail["steps"]),
+                    reasoning_final=(
+                        str(reasoning_detail["final"])
+                        if reasoning_detail["final"] is not None
+                        else None
+                    ),
+                    reasoning_order=(
+                        str(reasoning_detail["order"])
+                        if reasoning_detail["order"] is not None
+                        else None
+                    ),
                 )
             )
     return results

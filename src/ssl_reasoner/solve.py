@@ -18,6 +18,7 @@ def main() -> None:
     parser.add_argument("--operation-confidence-threshold", type=float, default=0.0)
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--debug-reasoning", action="store_true")
     parser.add_argument("problems", nargs="+")
     args = parser.parse_args()
 
@@ -39,6 +40,20 @@ def main() -> None:
         return
 
     for result in results:
+        if args.debug_reasoning:
+            print(f"answer: {result.answer}")
+            print(f"mode: {result.mode}")
+            print(f"problem: {result.problem}")
+            print(f"reasoning_order: {result.reasoning_order}")
+            for idx, step in enumerate(result.reasoning_steps, start=1):
+                print(
+                    f"step{idx}: lhs={step['lhs']} op={step['op']} "
+                    f"rhs={step['rhs']} result={step['result']}"
+                )
+            print(f"final: {result.reasoning_final}")
+            print(f"trace: {result.reasoning_trace}")
+            print()
+            continue
         if args.debug:
             print(
                 f"{result.answer}\tmode={result.mode} ops={result.operation_ids} "

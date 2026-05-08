@@ -223,6 +223,26 @@ bash scripts/eval_reasoning_sequence.sh
 CURRICULUM=mixed_only bash scripts/eval_reasoning_sequence.sh
 ```
 
+Inspect the structured reasoning fields for one query with:
+
+```bash
+CHECKPOINT=checkpoints/step_state_solver_mixed_only/best.pt \
+  bash scripts/solve_math.sh --debug-reasoning "What is 49-5+19?"
+```
+
+Example debug output:
+
+```text
+answer: 63
+mode: operation
+problem: What is 49-5+19?
+reasoning_order: left_first
+step1: lhs=49 op=- rhs=5 result=44
+step2: lhs=44 op=+ rhs=19 result=63
+final: 63
+trace: 49-5=44,44+19=63,63
+```
+
 The current checkpoint is:
 
 ```text
