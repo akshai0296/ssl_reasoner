@@ -1,15 +1,25 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
 
-from .data import CURRICULA, MATH_FEATURE_VOCAB_SIZE, MathDataset, generate_math_examples
+from .data import (
+    CURRICULA,
+    MATH_FEATURE_VOCAB_SIZE,
+    MathDataset,
+    extract_math_expression,
+    generate_math_examples,
+)
 from .diagnostics import latent_health
 from .model import MathJEPAReadout
 from .tokenizer import build_math_tokenizer
+
+
+TRACE_STEP_RE = re.compile(r"^(-?\d+)([+\-*])(-?\d+)=(-?\d+)$")
 
 
 def _device(name: str) -> torch.device:
@@ -243,6 +253,47 @@ def evaluate_reasoning_sequence(model, dataset, tokenizer, device, batch_size: i
     return correct / max(total, 1)
 
 
+def trace_is_equivalent(expr: str, trace: str) -> bool:
+    parts = re.split(r"([+\-*])", expr)
+    values = [int(parts[idx]) for idx in range(0, len(parts), 2)]
+    ops = [parts[idx] for idx in range(1, len(parts), 2)]
+    trace_parts = [part for part in trace.split(",") if part]
+    if len(trace_parts) != len(ops) + 1:
+        return False
+
+    for step_text in trace_parts[:-1]:
+        match = TRACE_STEP_RE.match(step_text)
+        if match is None:
+            return False
+        lhs, op, rhs, result = (
+            int(match.group(1)),
+            match.group(2),
+            int(match.group(3)),
+            int(match.group(4)),
+        )
+        if "*" in ops and op != "*":
+            return False
+        expected = lhs + rhs if op == "+" else lhs - rhs if op == "-" else lhs * rhs
+        if result != expected:
+            return False
+
+        reduce_idx = None
+        for idx, current_op in enumerate(ops):
+            if values[idx] == lhs and current_op == op and values[idx + 1] == rhs:
+                reduce_idx = idx
+                break
+        if reduce_idx is None:
+            return False
+        values[reduce_idx : reduce_idx + 2] = [result]
+        del ops[reduce_idx]
+
+    try:
+        final = int(trace_parts[-1])
+    except (IndexError, ValueError):
+        return False
+    return len(values) == 1 and final == values[0] == int(eval(expr))
+
+
 @torch.no_grad()
 def evaluate_variable_reasoner(model, dataset, device, batch_size: int) -> float:
     model.eval()
@@ -258,6 +309,31 @@ def evaluate_variable_reasoner(model, dataset, device, batch_size: int) -> float
         example_ok = ((step_ok.float() * mask).sum(dim=-1) == mask.sum(dim=-1)).float()
         correct += int(example_ok.sum().item())
         total += int(example_ok.numel())
+    return correct / max(total, 1)
+
+
+@torch.no_grad()
+def evaluate_variable_reasoner_trace(
+    model,
+    dataset,
+    device,
+    batch_size: int,
+    *,
+    constrain_to_legal: bool,
+) -> float:
+    model.eval()
+    loader = DataLoader(dataset, batch_size=batch_size)
+    correct = 0
+    total = 0
+    for batch in loader:
+        predictions = model.solve_variable_reasoning_texts(
+            batch["math_ids"].to(device),
+            constrain_to_legal=constrain_to_legal,
+            learned_values=True,
+        )
+        for problem, pred in zip(batch["problem"], predictions):
+            correct += int(trace_is_equivalent(extract_math_expression(problem), pred))
+            total += 1
     return correct / max(total, 1)
 
 
@@ -579,6 +655,17 @@ def run_stage(
                 step_state_final_acc = evaluate_step_state_final(
                     model, val_dataset, device, batch_size
                 )
+                variable_unconstrained_trace_acc = (
+                    evaluate_variable_reasoner_trace(
+                        model,
+                        val_dataset,
+                        device,
+                        batch_size,
+                        constrain_to_legal=False,
+                    )
+                    if name == "variable_reasoner"
+                    else 0.0
+                )
                 metrics = " ".join(
                     f"{key}={value.item():.4f}"
                     for key, value in out.items()
@@ -595,6 +682,7 @@ def run_stage(
                         "answer_value_acc",
                         "variable_active_acc",
                         "variable_op_acc",
+                        "variable_reduction_policy_acc",
                         "variable_position_acc",
                         "variable_legal_acc",
                         "variable_value_acc",
@@ -612,7 +700,8 @@ def run_stage(
                     f"structured_answer_acc={structured_answer_acc:.3f} "
                     f"answer_value_acc={answer_value_acc:.3f} "
                     f"trace_state_final_acc={trace_state_final_acc:.3f} "
-                    f"step_state_final_acc={step_state_final_acc:.3f}"
+                    f"step_state_final_acc={step_state_final_acc:.3f} "
+                    f"variable_unconstrained_trace_equiv={variable_unconstrained_trace_acc:.3f}"
                 )
                 op_metrics = " ".join(
                     f"{key}={value:.3f}"
@@ -663,7 +752,7 @@ def run_stage(
                         model, val_dataset, tokenizer, device, batch_size
                     )
                     if name == "reasoning_sequence"
-                    else evaluate_variable_reasoner(model, val_dataset, device, batch_size)
+                    else variable_unconstrained_trace_acc
                     if name == "variable_reasoner"
                     else pred_acc
                 )
@@ -1339,7 +1428,8 @@ def main() -> None:
             best_acc=best_acc,
         )
 
-    save_checkpoint(model, args, tokenizer, output_dir, best_acc)
+    if not (output_dir / "best.pt").exists():
+        save_checkpoint(model, args, tokenizer, output_dir, best_acc)
     print(f"done best_val_exact={best_acc:.3f} checkpoint={output_dir / 'best.pt'}")
 
 

@@ -341,24 +341,25 @@ distribution-bound:
 | Preset | Trace exact | Learned step value exact | Learned final value exact |
 | --- | ---: | ---: | ---: |
 | `in_dist` | `1.000` | `1.000` | `1.000` |
-| `larger_numbers` | `0.998` | `1.000` | `0.998` |
+| `larger_numbers` | `0.954` | `0.991` | `0.954` |
 | `longer_expr` | `1.000` | `1.000` | `1.000` |
 | `no_multiply` | `1.000` | `1.000` | `1.000` |
 | `many_multiply` | `1.000` | `1.000` | `1.000` |
 
 The variable reasoner now trains with a balanced multi-step curriculum and a 10-token
 math feature window, covering standard, longer, no-multiply, and many-multiply
-expressions. The main remaining gap in this OOD set is rare larger-number misses.
+expressions. Checkpoint selection uses unconstrained trace-equivalence, so the main
+remaining gap in this OOD set is larger-number arithmetic outside the training range.
 
 Without legal/canonical inference constraints, the learned pointer policy is weaker but
 still usually chooses valid reductions:
 
 | Preset | Unconstrained trace equivalent exact | Unconstrained final value exact |
 | --- | ---: | ---: |
-| `in_dist` | `0.986` | `0.986` |
-| `larger_numbers` | `0.988` | `0.988` |
-| `longer_expr` | `0.870` | `0.870` |
-| `no_multiply` | `0.766` | `0.766` |
+| `in_dist` | `1.000` | `1.000` |
+| `larger_numbers` | `0.954` | `0.954` |
+| `longer_expr` | `1.000` | `1.000` |
+| `no_multiply` | `1.000` | `1.000` |
 | `many_multiply` | `1.000` | `1.000` |
 
 ## Smoke Train

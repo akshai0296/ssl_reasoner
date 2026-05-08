@@ -458,6 +458,7 @@ class VariableStructuredReasoner(nn.Module):
         self.cell = nn.GRUCell(d_model, d_model)
         self.active_head = nn.Linear(d_model, 1)
         self.op_head = nn.Linear(d_model, 4)
+        self.reduction_policy_head = nn.Linear(d_model, 2)
         self.position_query = nn.Linear(d_model, d_model)
         self.position_key = nn.Linear(d_model + 5, d_model)
         self.result_head = nn.Sequential(
@@ -564,6 +565,7 @@ class VariableStructuredReasoner(nn.Module):
         return {
             "active_logits": self.active_head(step_states).squeeze(-1),
             "op_logits": self.op_head(step_states),
+            "reduction_policy_logits": self.reduction_policy_head(step_states),
             "position_logits": position_logits,
             "states": step_states,
         }
@@ -595,6 +597,15 @@ class VariableStructuredReasoner(nn.Module):
             reduction="none",
         ).view_as(step_mask)
         op_loss = (op_loss * step_mask).sum() / step_mask.sum().clamp(min=1.0)
+        reduction_policy_targets = op_targets.ne(3).long()
+        reduction_policy_loss = F.cross_entropy(
+            out["reduction_policy_logits"].reshape(-1, 2),
+            reduction_policy_targets.reshape(-1),
+            reduction="none",
+        ).view_as(step_mask)
+        reduction_policy_loss = (
+            reduction_policy_loss * step_mask
+        ).sum() / step_mask.sum().clamp(min=1.0)
         position_loss = F.cross_entropy(
             position_logits.reshape(-1, self.max_steps),
             position_targets.reshape(-1),
@@ -625,6 +636,13 @@ class VariableStructuredReasoner(nn.Module):
         op_acc = (
             (out["op_logits"].argmax(dim=-1) == op_targets).float() * step_mask
         ).sum() / step_mask.sum().clamp(min=1.0)
+        reduction_policy_acc = (
+            (
+                out["reduction_policy_logits"].argmax(dim=-1)
+                == reduction_policy_targets
+            ).float()
+            * step_mask
+        ).sum() / step_mask.sum().clamp(min=1.0)
         position_acc = (
             (position_logits.argmax(dim=-1) == position_targets).float() * step_mask
         ).sum() / step_mask.sum().clamp(min=1.0)
@@ -647,14 +665,23 @@ class VariableStructuredReasoner(nn.Module):
             * step_mask
         ).sum() / step_mask.sum().clamp(min=1.0)
         return {
-            "loss": active_loss + op_loss + position_loss + legal_loss + value_loss,
+            "loss": (
+                active_loss
+                + op_loss
+                + reduction_policy_loss
+                + position_loss
+                + legal_loss
+                + value_loss
+            ),
             "variable_active_loss": active_loss,
             "variable_op_loss": op_loss,
+            "variable_reduction_policy_loss": reduction_policy_loss,
             "variable_position_loss": position_loss,
             "variable_legal_loss": legal_loss,
             "variable_value_loss": value_loss,
             "variable_active_acc": active_acc,
             "variable_op_acc": op_acc,
+            "variable_reduction_policy_acc": reduction_policy_acc,
             "variable_position_acc": position_acc,
             "variable_legal_acc": legal_acc,
             "variable_value_acc": value_acc,

@@ -382,7 +382,7 @@ def generate_math_examples(
         elif curriculum == "multi_step_balanced":
             difficulty = 2
             op = None
-            variant = idx % 4
+            variant = idx % 5
             if variant == 0:
                 expr, value, op_label = _make_expression(
                     rng, difficulty, op=op, **expression_kwargs
@@ -400,7 +400,7 @@ def generate_math_examples(
                 value = eval(expr)
                 op_label = "multi_step"
                 split_label = "longer_expr"
-            elif variant == 2:
+            elif variant in {2, 4}:
                 operands = [_rand_operand(rng, (0, 50))]
                 operands.extend(_rand_operand(rng, (0, 20)) for _ in range(3))
                 expr_ops = [rng.choice(["+", "-"]) for _ in range(3)]
