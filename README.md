@@ -264,6 +264,46 @@ reasoning-sequence eval now uses structured state decoding before text rendering
 the stronger path because exact fields are checked before producing the final trace
 string.
 
+## Variable-Length Structured Reasoning
+
+For expressions longer than the learned two-step state solver, the debug/eval path now
+builds a variable-length structured trace with operator precedence:
+
+```bash
+bash scripts/solve_math.sh --debug-reasoning "What is 2+3*4-1?"
+```
+
+Example:
+
+```text
+answer: 13
+mode: parsed_expression
+problem: What is 2+3*4-1?
+reasoning_order: variable_precedence
+step1: lhs=3 op=* rhs=4 result=12
+step2: lhs=2 op=+ rhs=12 result=14
+step3: lhs=14 op=- rhs=1 result=13
+final: 13
+trace: 3*4=12,2+12=14,14-1=13,13
+```
+
+Evaluate the variable-length trace path with:
+
+```bash
+bash scripts/eval_variable_reasoning.sh
+```
+
+Current 500-sample `multi_step` result:
+
+| Metric | Score |
+| --- | ---: |
+| answer exact | `1.000` |
+| trace exact | `1.000` |
+
+This variable-length path is currently structured and deterministic. It establishes the
+multi-step trace contract and eval target; the next research step is replacing the
+deterministic transition with a learned recurrent transition model.
+
 ## Smoke Train
 
 ```bash

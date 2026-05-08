@@ -10,6 +10,7 @@ from .data import (
     TRACE_VALUE_CLASSES,
     class_to_value,
     encode_math_features,
+    make_variable_trace_steps,
 )
 from .model import MathJEPAReadout
 from .tokenizer import CharTokenizer, build_math_tokenizer
@@ -135,6 +136,37 @@ def predict_structured_reasoning_details(
 
     rows: list[dict[str, object]] = []
     for math_row, state_row, order_id in zip(math_rows, values, order_ids):
+        op_count = sum(1 for idx in range(1, len(math_row), 2) if math_row[idx] != 0)
+        if op_count > 2:
+            expr_parts: list[str] = []
+            for idx, token_id in enumerate(math_row):
+                if token_id == 0:
+                    break
+                if idx % 2 == 0:
+                    expr_parts.append(str(MathJEPAReadout._math_value(token_id)))
+                else:
+                    expr_parts.append(_op_text(MathJEPAReadout._math_op_id(token_id)))
+            steps = [
+                _reasoning_step(lhs, {"+": 1, "-": 2, "*": 3}[op], rhs, result)
+                for lhs, op, rhs, result in make_variable_trace_steps("".join(expr_parts))
+            ]
+            final = steps[-1]["result"] if steps else None
+            trace = ",".join(
+                f"{step['lhs']}{step['op']}{step['rhs']}={step['result']}"
+                for step in steps
+            )
+            if final is not None:
+                trace = f"{trace},{final}"
+            rows.append(
+                {
+                    "trace": trace,
+                    "steps": steps,
+                    "final": str(final) if final is not None else None,
+                    "order": "variable_precedence",
+                }
+            )
+            continue
+
         a = MathJEPAReadout._math_value(math_row[0])
         op1_id = MathJEPAReadout._math_op_id(math_row[1])
         b = MathJEPAReadout._math_value(math_row[2])

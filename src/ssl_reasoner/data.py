@@ -30,6 +30,7 @@ TRACE_OP_TO_ID = {"none": 0, "+": 1, "-": 2, "*": 3}
 TRACE_VALUE_MIN = -200
 TRACE_VALUE_MAX = 1200
 TRACE_VALUE_CLASSES = TRACE_VALUE_MAX - TRACE_VALUE_MIN + 1
+EXPR_RE = re.compile(r"\d+(?:[+\-*]\d+)+")
 
 
 def encode_math_features(problem: str, max_len: int = 8) -> list[int]:
@@ -50,23 +51,50 @@ def encode_math_features(problem: str, max_len: int = 8) -> list[int]:
     return ids
 
 
-def make_trace(expr: str) -> str:
-    parts = re.split(r"([+\-*])", expr)
-    if len(parts) != 5:
-        return f"{expr}={eval(expr)}"
+def extract_math_expression(problem: str) -> str:
+    match = EXPR_RE.search(problem)
+    if match is None:
+        raise ValueError(f"No arithmetic expression found in: {problem!r}")
+    return match.group(0)
 
-    a, op1, b, op2, c = parts
-    if op2 == "*":
-        first_expr = f"{b}{op2}{c}"
-        first_value = eval(first_expr)
-        second_expr = f"{a}{op1}{first_value}"
-        second_value = eval(second_expr)
-    else:
-        first_expr = f"{a}{op1}{b}"
-        first_value = eval(first_expr)
-        second_expr = f"{first_value}{op2}{c}"
-        second_value = eval(second_expr)
-    return f"{first_expr}={first_value} {second_expr}={second_value}"
+
+def make_variable_trace_steps(expr: str) -> list[tuple[int, str, int, int]]:
+    parts = re.split(r"([+\-*])", expr)
+    values = [int(parts[idx]) for idx in range(0, len(parts), 2)]
+    ops = [parts[idx] for idx in range(1, len(parts), 2)]
+    steps: list[tuple[int, str, int, int]] = []
+
+    while "*" in ops:
+        idx = ops.index("*")
+        lhs = values[idx]
+        rhs = values[idx + 1]
+        result = lhs * rhs
+        steps.append((lhs, "*", rhs, result))
+        values[idx : idx + 2] = [result]
+        del ops[idx]
+
+    while ops:
+        lhs = values[0]
+        rhs = values[1]
+        op = ops[0]
+        if op == "+":
+            result = lhs + rhs
+        elif op == "-":
+            result = lhs - rhs
+        else:
+            raise ValueError(f"Unsupported operator: {op}")
+        steps.append((lhs, op, rhs, result))
+        values[:2] = [result]
+        del ops[0]
+
+    return steps
+
+
+def make_trace(expr: str) -> str:
+    return " ".join(
+        f"{lhs}{op}{rhs}={result}"
+        for lhs, op, rhs, result in make_variable_trace_steps(expr)
+    )
 
 
 def make_reasoning_text(expr: str) -> str:
@@ -80,6 +108,21 @@ def make_reasoning_step_texts(expr: str) -> tuple[list[str], list[float]]:
     if len(trace_parts) == 1:
         return [trace_parts[0], answer, ""], [1.0, 1.0, 0.0]
     return [trace_parts[0], trace_parts[1], answer], [1.0, 1.0, 1.0]
+
+
+def make_variable_trace_fields(
+    expr: str,
+    max_steps: int = 4,
+) -> tuple[list[int], list[list[float]], list[float]]:
+    steps = make_variable_trace_steps(expr)[:max_steps]
+    op_ids = [TRACE_OP_TO_ID[op] for _, op, _, _ in steps]
+    values = [[float(lhs), float(rhs), float(result)] for lhs, _, rhs, result in steps]
+    mask = [1.0] * len(steps)
+    while len(op_ids) < max_steps:
+        op_ids.append(TRACE_OP_TO_ID["none"])
+        values.append([0.0, 0.0, 0.0])
+        mask.append(0.0)
+    return op_ids, values, mask
 
 
 def _value_to_class(value: float) -> int:
@@ -188,6 +231,17 @@ def _make_expression(
         expr = f"{a}{op}{b}"
         return expr, eval(expr), op
 
+    if difficulty == 2:
+        operands = [_rand_operand(rng, (0, 50))]
+        operands.extend(_rand_operand(rng, (0, 20)) for _ in range(3))
+        expr_ops = [rng.choice(["+", "-", "*"]) for _ in range(3)]
+        if "*" not in expr_ops:
+            expr_ops[rng.randrange(len(expr_ops))] = "*"
+        expr = "".join(
+            f"{value}{op}" for value, op in zip(operands, expr_ops)
+        ) + str(operands[-1])
+        return expr, eval(expr), "multi_step"
+
     a = _rand_operand(rng, mixed_ab_bounds)
     b = _rand_operand(rng, mixed_ab_bounds)
     c = _rand_operand(rng, mixed_c_bounds)
@@ -208,6 +262,7 @@ CURRICULA = (
     "mixed",
     "single_op_balanced",
     "mixed_only",
+    "multi_step",
     *sorted(COMPOSITIONAL_CURRICULA),
 )
 
@@ -268,6 +323,9 @@ def generate_math_examples(
         elif curriculum == "mixed_only":
             difficulty = 1
             op = None
+        elif curriculum == "multi_step":
+            difficulty = 2
+            op = None
         elif curriculum in COMPOSITIONAL_CURRICULA:
             difficulty, op, split_label, expression_kwargs = _compositional_spec(
                 curriculum, idx
@@ -323,15 +381,14 @@ class MathDataset(Dataset):
         answer_ids = self.tokenizer.encode(ex.answer, self.max_answer_len)
         math_ids = encode_math_features(ex.problem, self.max_math_len)
         trace_ids = self.tokenizer.encode(ex.trace, self.max_trace_len)
-        trace_op_ids, trace_values, trace_value_mask = make_trace_fields(
-            re.search(r"\d+[+\-*]\d+(?:[+\-*]\d+)?", ex.problem).group(0)
-        )
-        trace_state_values, trace_state_mask = make_trace_state_targets(
-            re.search(r"\d+[+\-*]\d+(?:[+\-*]\d+)?", ex.problem).group(0)
-        )
-        expr = re.search(r"\d+[+\-*]\d+(?:[+\-*]\d+)?", ex.problem).group(0)
+        expr = extract_math_expression(ex.problem)
+        trace_op_ids, trace_values, trace_value_mask = make_trace_fields(expr)
+        trace_state_values, trace_state_mask = make_trace_state_targets(expr)
         reasoning_text = make_reasoning_text(expr)
         reasoning_step_texts, reasoning_step_mask = make_reasoning_step_texts(expr)
+        variable_trace_op_ids, variable_trace_values, variable_trace_mask = (
+            make_variable_trace_fields(expr)
+        )
         reasoning_step_ids = [
             self.tokenizer.encode(text, self.max_answer_len)
             for text in reasoning_step_texts
@@ -352,6 +409,9 @@ class MathDataset(Dataset):
             "trace_value_mask": torch.tensor(trace_value_mask, dtype=torch.float),
             "trace_state_values": torch.tensor(trace_state_values, dtype=torch.float),
             "trace_state_mask": torch.tensor(trace_state_mask, dtype=torch.float),
+            "variable_trace_op_ids": torch.tensor(variable_trace_op_ids, dtype=torch.long),
+            "variable_trace_values": torch.tensor(variable_trace_values, dtype=torch.float),
+            "variable_trace_mask": torch.tensor(variable_trace_mask, dtype=torch.float),
             "reasoning_step_ids": torch.tensor(reasoning_step_ids, dtype=torch.long),
             "reasoning_step_mask": torch.tensor(reasoning_step_mask, dtype=torch.float),
             "reasoning_ids": torch.tensor(reasoning_ids, dtype=torch.long),

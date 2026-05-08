@@ -10,6 +10,7 @@ from ssl_reasoner.data import (
     make_trace_fields,
     make_reasoning_text,
     make_reasoning_step_texts,
+    make_variable_trace_steps,
     make_trace_state_targets,
 )
 from ssl_reasoner.diagnostics import latent_health
@@ -154,6 +155,19 @@ def test_structured_state_renderer_formats_reasoning_trace():
         [44.0, 63.0],
         order_id=0,
     ) == "49-5=44,44+19=63,63"
+
+
+def test_variable_trace_steps_follow_precedence():
+    assert make_variable_trace_steps("30+10+5-5") == [
+        (30, "+", 10, 40),
+        (40, "+", 5, 45),
+        (45, "-", 5, 40),
+    ]
+    assert make_variable_trace_steps("2+3*4-1") == [
+        (3, "*", 4, 12),
+        (2, "+", 12, 14),
+        (14, "-", 1, 13),
+    ]
 
 
 def test_symbolic_candidate_texts_include_precedence_and_variants():
