@@ -202,11 +202,21 @@ def test_variable_trace_equivalence_accepts_valid_alternate_orders():
 
 
 def test_multi_step_balanced_curriculum_includes_ood_variants():
-    examples = generate_math_examples(8, seed=0, curriculum="multi_step_balanced")
+    examples = generate_math_examples(12, seed=0, curriculum="multi_step_balanced")
     labels = {example.split_label for example in examples}
-    assert {"multi_step", "longer_expr", "no_multiply", "many_multiply"} <= labels
+    assert {
+        "multi_step",
+        "larger_numbers",
+        "longer_expr",
+        "no_multiply",
+        "many_multiply",
+    } <= labels
     assert any(len(encode_math_features(example.problem, max_len=10)) == 10 for example in examples)
     assert any("*" not in re.search(r"\d+(?:[+\-*]\d+)+", example.problem).group(0) for example in examples)
+    assert any(
+        max(int(token) for token in re.findall(r"\d+", example.problem)) > 60
+        for example in examples
+    )
 
 
 def test_symbolic_candidate_texts_include_precedence_and_variants():
