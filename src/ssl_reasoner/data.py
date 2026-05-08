@@ -398,6 +398,7 @@ CURRICULA = (
     "mixed_only",
     "multi_step",
     "multi_step_balanced",
+    "large_reductions",
     *sorted(COMPOSITIONAL_CURRICULA),
 )
 
@@ -508,13 +509,52 @@ def generate_math_examples(
                     num_ops=num_ops,
                 )
                 split_label = f"length_{num_ops}"
+        elif curriculum == "large_reductions":
+            difficulty = 2
+            op = None
+            variant = idx % 4
+            if variant == 0:
+                expr, value, op_label = _make_multi_step_expression(
+                    rng,
+                    num_ops=3,
+                    first_bounds=(51, 120),
+                    other_bounds=(21, 60),
+                )
+                split_label = "larger_numbers"
+            elif variant == 1:
+                expr, value, op_label = _make_multi_step_expression(
+                    rng,
+                    num_ops=4,
+                    first_bounds=(51, 150),
+                    other_bounds=(11, 40),
+                )
+                split_label = "larger_longer"
+            elif variant == 2:
+                expr, value, op_label = _make_multi_step_expression(
+                    rng,
+                    num_ops=3,
+                    first_bounds=(51, 200),
+                    other_bounds=(21, 120),
+                    op_choices=("+", "-"),
+                    require_multiply=False,
+                )
+                split_label = "larger_no_multiply"
+            else:
+                expr, value, op_label = _make_multi_step_expression(
+                    rng,
+                    num_ops=3,
+                    first_bounds=(11, 80),
+                    other_bounds=(11, 80),
+                    min_multiply_count=2,
+                )
+                split_label = "larger_many_multiply"
         elif curriculum in COMPOSITIONAL_CURRICULA:
             difficulty, op, split_label, expression_kwargs = _compositional_spec(
                 curriculum, idx
             )
         else:
             raise ValueError(f"Unknown curriculum: {curriculum}")
-        if curriculum != "multi_step_balanced":
+        if curriculum not in {"multi_step_balanced", "large_reductions"}:
             expr, value, op_label = _make_expression(
                 rng, difficulty, op=op, **expression_kwargs
             )

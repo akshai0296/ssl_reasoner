@@ -240,6 +240,22 @@ def test_multi_step_balanced_curriculum_includes_ood_variants():
     assert sum(mask) == 16.0
 
 
+def test_large_reductions_curriculum_focuses_larger_values():
+    examples = generate_math_examples(16, seed=0, curriculum="large_reductions")
+    labels = {example.split_label for example in examples}
+
+    assert {
+        "larger_numbers",
+        "larger_longer",
+        "larger_no_multiply",
+        "larger_many_multiply",
+    } <= labels
+    assert any(
+        max(int(token) for token in re.findall(r"\d+", example.problem)) > 100
+        for example in examples
+    )
+
+
 def test_symbolic_candidate_texts_include_precedence_and_variants():
     candidates = symbolic_candidate_texts("Find the value of 20+1*0.", base_prediction="19")
     assert candidates[0] == "20"
@@ -706,10 +722,12 @@ def test_standalone_transition_forward():
     rhs = torch.tensor([8.0, 2.0, 7.0])
     logits = model.standalone_transition(lhs, op_ids, rhs)
     digit_pred = model.standalone_transition.predict_value(lhs, op_ids, rhs, mode="digit")
+    factor_pred = model.standalone_transition.predict_value(lhs, op_ids, rhs, mode="factor")
     hybrid_pred = model.standalone_transition.predict_value(lhs, op_ids, rhs, mode="hybrid")
 
     assert logits.shape[0] == 3
     assert digit_pred.shape == (3,)
+    assert factor_pred.shape == (3,)
     assert hybrid_pred.shape == (3,)
 
 

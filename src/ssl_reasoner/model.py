@@ -20,6 +20,9 @@ TRANSITION_VALUE_MIN = -1000
 TRANSITION_VALUE_MAX = 10000
 TRANSITION_VALUE_CLASSES = TRANSITION_VALUE_MAX - TRANSITION_VALUE_MIN + 1
 STANDALONE_TRANSITION_DIGITS = 10
+FACTOR_BUCKET_BASES = (0, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000)
+FACTOR_BUCKET_SIZES = (10, 90, 900, 9000, 90000, 900000, 9000000, 90000000, 900000000)
+FACTOR_OFFSET_CLASSES = 1000
 MATH_FEATURE_NUM_OFFSET = 1
 MATH_FEATURE_PLUS_ID = 202
 MATH_FEATURE_MINUS_ID = 203
@@ -57,6 +60,14 @@ class StandaloneArithmeticTransition(nn.Module):
             nn.Linear(d_model * 4, d_model * 2),
             nn.GELU(),
             nn.Linear(d_model * 2, 2 + STANDALONE_TRANSITION_DIGITS * 10),
+        )
+        self.factor_head = nn.Sequential(
+            nn.LayerNorm(d_model * 3),
+            nn.Linear(d_model * 3, d_model * 4),
+            nn.GELU(),
+            nn.Linear(d_model * 4, d_model * 2),
+            nn.GELU(),
+            nn.Linear(d_model * 2, 2 + len(FACTOR_BUCKET_BASES) + FACTOR_OFFSET_CLASSES),
         )
 
     @staticmethod
@@ -145,6 +156,54 @@ class StandaloneArithmeticTransition(nn.Module):
         digit_logits = logits[:, 2:].view(-1, STANDALONE_TRANSITION_DIGITS, 10)
         return sign_logits, digit_logits
 
+    @staticmethod
+    def value_to_factor_targets(values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        rounded = values.round().long()
+        sign = rounded.lt(0).long()
+        max_magnitude = FACTOR_BUCKET_BASES[-1] + FACTOR_BUCKET_SIZES[-1] - 1
+        magnitude = rounded.abs().clamp(max=max_magnitude)
+        bucket = torch.zeros_like(magnitude)
+        offset = torch.zeros_like(magnitude)
+        for idx, (base, size) in enumerate(zip(FACTOR_BUCKET_BASES, FACTOR_BUCKET_SIZES)):
+            if idx + 1 < len(FACTOR_BUCKET_BASES):
+                is_bucket = magnitude.ge(base) & magnitude.lt(FACTOR_BUCKET_BASES[idx + 1])
+            else:
+                is_bucket = magnitude.ge(base) & magnitude.le(base + size - 1)
+            relative = (magnitude - base).clamp(min=0, max=size - 1)
+            scaled = (relative * FACTOR_OFFSET_CLASSES) // size
+            bucket = torch.where(is_bucket, torch.full_like(bucket, idx), bucket)
+            offset = torch.where(is_bucket, scaled.clamp(max=FACTOR_OFFSET_CLASSES - 1), offset)
+        return sign, bucket, offset
+
+    @staticmethod
+    def factor_to_value(
+        sign_ids: torch.Tensor,
+        bucket_ids: torch.Tensor,
+        offset_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        bases = torch.tensor(FACTOR_BUCKET_BASES, device=bucket_ids.device, dtype=torch.long)
+        sizes = torch.tensor(FACTOR_BUCKET_SIZES, device=bucket_ids.device, dtype=torch.long)
+        bucket_ids = bucket_ids.long().clamp(min=0, max=len(FACTOR_BUCKET_BASES) - 1)
+        base = bases[bucket_ids]
+        size = sizes[bucket_ids]
+        offset_ids = offset_ids.long().clamp(min=0, max=FACTOR_OFFSET_CLASSES - 1)
+        relative = (offset_ids * size) // FACTOR_OFFSET_CLASSES
+        magnitude = base + relative
+        return torch.where(sign_ids.long().eq(1), -magnitude, magnitude)
+
+    def factor_logits(
+        self,
+        lhs: torch.Tensor,
+        op_ids: torch.Tensor,
+        rhs: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        logits = self.factor_head(self.encode_transition(lhs, op_ids, rhs))
+        sign_logits = logits[:, :2]
+        bucket_end = 2 + len(FACTOR_BUCKET_BASES)
+        bucket_logits = logits[:, 2:bucket_end]
+        offset_logits = logits[:, bucket_end:]
+        return sign_logits, bucket_logits, offset_logits
+
     def loss(
         self,
         lhs: torch.Tensor,
@@ -195,14 +254,50 @@ class StandaloneArithmeticTransition(nn.Module):
         digit_acc = (
             (digit_pred == flat_result.round().long()).float() * active_mask
         ).sum() / active_mask.sum().clamp(min=1.0)
+        factor_sign_logits, factor_bucket_logits, factor_offset_logits = self.factor_logits(
+            lhs.reshape(-1),
+            op_ids.reshape(-1),
+            rhs.reshape(-1),
+        )
+        factor_sign_targets, factor_bucket_targets, factor_offset_targets = (
+            self.value_to_factor_targets(flat_result)
+        )
+        factor_sign_loss = F.cross_entropy(
+            factor_sign_logits,
+            factor_sign_targets,
+            reduction="none",
+        )
+        factor_bucket_loss = F.cross_entropy(
+            factor_bucket_logits,
+            factor_bucket_targets,
+            reduction="none",
+        )
+        factor_offset_loss = F.cross_entropy(
+            factor_offset_logits,
+            factor_offset_targets,
+            reduction="none",
+        )
+        factor_loss = (
+            (factor_sign_loss + factor_bucket_loss + factor_offset_loss) * active_mask
+        ).sum() / active_mask.sum().clamp(min=1.0)
+        factor_pred = self.factor_to_value(
+            factor_sign_logits.argmax(dim=-1),
+            factor_bucket_logits.argmax(dim=-1),
+            factor_offset_logits.argmax(dim=-1),
+        )
+        factor_acc = (
+            (factor_pred == flat_result.round().long()).float() * active_mask
+        ).sum() / active_mask.sum().clamp(min=1.0)
         return {
-            "loss": loss + digit_sign_loss + digit_value_loss,
+            "loss": loss + digit_sign_loss + digit_value_loss + factor_loss,
             "standalone_transition_loss": loss,
             "standalone_transition_acc": acc,
             "standalone_transition_coverage": coverage,
             "standalone_transition_digit_sign_loss": digit_sign_loss,
             "standalone_transition_digit_value_loss": digit_value_loss,
             "standalone_transition_digit_acc": digit_acc,
+            "standalone_transition_factor_loss": factor_loss,
+            "standalone_transition_factor_acc": factor_acc,
         }
 
     @torch.no_grad()
@@ -224,13 +319,23 @@ class StandaloneArithmeticTransition(nn.Module):
         )
         if mode == "digit":
             return digit_pred
+        factor_sign_logits, factor_bucket_logits, factor_offset_logits = self.factor_logits(
+            lhs, op_ids, rhs
+        )
+        factor_pred = self.factor_to_value(
+            factor_sign_logits.argmax(dim=-1),
+            factor_bucket_logits.argmax(dim=-1),
+            factor_offset_logits.argmax(dim=-1),
+        )
+        if mode == "factor":
+            return factor_pred
         if mode != "hybrid":
             raise ValueError(f"Unknown standalone transition mode: {mode}")
         class_probs = class_logits.softmax(dim=-1)
         class_conf = class_probs.max(dim=-1).values
         at_boundary = class_pred.eq(TRANSITION_VALUE_MIN) | class_pred.eq(TRANSITION_VALUE_MAX)
-        use_digit = at_boundary | class_conf.lt(0.75)
-        return torch.where(use_digit, digit_pred, class_pred)
+        use_factor = at_boundary | class_conf.lt(0.75)
+        return torch.where(use_factor, factor_pred, class_pred)
 
 
 class MeanPoolEncoder(nn.Module):
@@ -2409,6 +2514,7 @@ class MathJEPAReadout(nn.Module):
         class_learned_values: bool = False,
         standalone_learned_values: bool = False,
         standalone_digit_values: bool = False,
+        standalone_factor_values: bool = False,
         standalone_hybrid_values: bool = False,
     ) -> list[str]:
         math_rows = math_ids.detach().cpu().tolist()
@@ -2465,7 +2571,12 @@ class MathJEPAReadout(nn.Module):
                     result = lhs * rhs
                 else:
                     break
-                if standalone_learned_values or standalone_digit_values or standalone_hybrid_values:
+                if (
+                    standalone_learned_values
+                    or standalone_digit_values
+                    or standalone_factor_values
+                    or standalone_hybrid_values
+                ):
                     lhs_tensor = torch.tensor([lhs], device=math_ids.device)
                     rhs_tensor = torch.tensor([rhs], device=math_ids.device)
                     standalone_result = self.standalone_transition.predict_value(
@@ -2475,6 +2586,8 @@ class MathJEPAReadout(nn.Module):
                         mode=(
                             "digit"
                             if standalone_digit_values
+                            else "factor"
+                            if standalone_factor_values
                             else "hybrid"
                             if standalone_hybrid_values
                             else "class"

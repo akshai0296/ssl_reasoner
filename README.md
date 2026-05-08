@@ -462,6 +462,11 @@ PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
   --checkpoint checkpoints/standalone_transition_hybrid/best.pt \
   --standalone-hybrid-values \
   --preset all
+
+PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
+  --checkpoint checkpoints/standalone_transition_factor/best.pt \
+  --standalone-factor-values \
+  --preset all
 ```
 
 Measured single-step answer exact on 500 generated `single_op_balanced` examples:
@@ -530,6 +535,43 @@ bounded class path, so class mode remains the best current setting:
 On 500 in-dist samples, `standalone_transition_hybrid` in class mode reaches `0.764`.
 This shows the extra reduction training helped, but the digit fallback is not yet the
 right larger-number solution.
+
+The next out-of-range experiment adds a factorized standalone value head:
+
+```text
+sign class + magnitude bucket + within-bucket offset
+```
+
+It also adds a `large_reductions` curriculum that puts more pressure on larger
+intermediate values:
+
+```bash
+STEPS=5000 TRAIN_SIZE=60000 VAL_SIZE=3000 \
+TRAIN_CURRICULUM=large_reductions VAL_CURRICULUM=large_reductions \
+CHECKPOINT=checkpoints/standalone_transition_factor/best.pt \
+OUTPUT_DIR=checkpoints/standalone_transition_large \
+  bash scripts/train_standalone_transition_reductions.sh
+```
+
+Current 200-sample results show that this representation is measurable, but it does not
+solve larger-number arithmetic:
+
+| Checkpoint / mode | In-dist | Larger numbers | Longer expr | No multiply | Many multiply | Length 8 | Length 16 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `standalone_transition_factor`, class | `0.750` | `0.005` | `0.700` | `1.000` | `0.620` | `0.395` | `0.125` |
+| `standalone_transition_factor`, factor | `0.065` | `0.000` | `0.055` | `0.080` | `0.080` | `0.015` | `0.000` |
+| `standalone_transition_factor`, hybrid | `0.690` | `0.000` | `0.645` | `1.000` | `0.565` | `0.305` | `0.070` |
+| `standalone_transition_large`, class | `0.150` | `0.000` | `0.115` | `0.470` | `0.100` | `0.020` | `0.000` |
+| `standalone_transition_large`, factor | `0.005` | `0.000` | `0.000` | `0.015` | `0.000` | `0.000` | `0.000` |
+| `standalone_transition_large`, hybrid | `0.115` | `0.005` | `0.095` | `0.420` | `0.075` | `0.005` | `0.000` |
+
+The targeted large checkpoint reached `0.691` validation exact on its own
+`large_reductions` curriculum, but it regressed the standard presets. The current best
+standalone transition remains `standalone_transition_factor` in bounded class mode for
+general multi-step arithmetic, while larger-number generalization is still effectively
+unsolved. The next real improvement should be algorithmic numeric decomposition
+instead of another direct whole-value head: carry/borrow states for addition/subtraction
+and partial-product states for multiplication.
 
 ## Smoke Train
 

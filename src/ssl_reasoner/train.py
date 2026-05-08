@@ -739,6 +739,7 @@ def run_stage(
                         "standalone_transition_acc",
                         "standalone_transition_coverage",
                         "standalone_transition_digit_acc",
+                        "standalone_transition_factor_acc",
                     }
                 )
                 print(

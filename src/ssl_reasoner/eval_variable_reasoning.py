@@ -209,6 +209,7 @@ def evaluate_preset(
         or args.class_learned_values
         or args.standalone_learned_values
         or args.standalone_digit_values
+        or args.standalone_factor_values
         or args.standalone_hybrid_values
     ):
         max_math_len = train_args.get("max_math_len", 8)
@@ -230,6 +231,7 @@ def evaluate_preset(
                     class_learned_values=args.class_learned_values,
                     standalone_learned_values=args.standalone_learned_values,
                     standalone_digit_values=args.standalone_digit_values,
+                    standalone_factor_values=args.standalone_factor_values,
                     standalone_hybrid_values=args.standalone_hybrid_values,
                 )
             )
@@ -314,6 +316,7 @@ def evaluate_problem(
         class_learned_values=args.class_learned_values,
         standalone_learned_values=args.standalone_learned_values,
         standalone_digit_values=args.standalone_digit_values,
+        standalone_factor_values=args.standalone_factor_values,
         standalone_hybrid_values=args.standalone_hybrid_values,
     )
     pred_trace = traces[0]
@@ -359,6 +362,7 @@ def main() -> None:
     parser.add_argument("--class-learned-values", action="store_true")
     parser.add_argument("--standalone-learned-values", action="store_true")
     parser.add_argument("--standalone-digit-values", action="store_true")
+    parser.add_argument("--standalone-factor-values", action="store_true")
     parser.add_argument("--standalone-hybrid-values", action="store_true")
     parser.add_argument("--unconstrained", action="store_true")
     args = parser.parse_args()
