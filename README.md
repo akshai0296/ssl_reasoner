@@ -423,10 +423,13 @@ arithmetic first" direction:
 ```bash
 bash scripts/train_variable_digit_value_head.sh
 bash scripts/train_variable_class_value_head.sh
+bash scripts/train_standalone_transition.sh
 ```
 
 The digit head predicts sign plus fixed decimal digits. The class head predicts a bounded
-integer class from `-1000` to `10000`. Both can be used in variable-reasoning eval:
+integer class from `-1000` to `10000`. The standalone transition encoder is stronger:
+it sees only `(lhs, op, rhs)` through learned number embeddings plus numeric features,
+then predicts the bounded result class. These can be used in variable-reasoning eval:
 
 ```bash
 PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
@@ -438,6 +441,11 @@ PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
   --checkpoint checkpoints/variable_class_value_head_single/best.pt \
   --class-learned-values \
   --preset in_dist
+
+PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
+  --checkpoint checkpoints/standalone_transition_single/best.pt \
+  --standalone-learned-values \
+  --preset in_dist
 ```
 
 Measured single-step answer exact on 500 generated `single_op_balanced` examples:
@@ -447,11 +455,22 @@ Measured single-step answer exact on 500 generated `single_op_balanced` examples
 | candidate-scored value head | `0.978` |
 | digit value head | `0.062` |
 | bounded class value head | `0.298` |
+| standalone transition encoder | `0.982` |
 
-The class head is the better raw learned baseline, but it is not yet strong enough to
-replace candidate scoring. The next raw-arithmetic improvement should train a stronger
-transition encoder directly on `(lhs, op, rhs) -> result`, not only as a small head on top
-of the existing variable-reasoner hidden state.
+Standalone by-op breakdown on that eval:
+
+| Op | Exact |
+| --- | ---: |
+| `+` | `0.958` |
+| `-` | `0.988` |
+| `*` | `1.000` |
+
+Plugging the single-step standalone transition directly into multi-step in-distribution
+reasoning gives `0.310` answer exact. The remaining gap is expected: multi-step traces
+create intermediate negative and large states that are not covered well by the
+single-step curriculum. The next raw-arithmetic step is to train this standalone
+transition on the full reduction-state distribution, then use it in the variable
+reasoner.
 
 ## Smoke Train
 

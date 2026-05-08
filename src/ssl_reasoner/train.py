@@ -119,6 +119,27 @@ def evaluate_with_breakdown(
 
 
 @torch.no_grad()
+def evaluate_standalone_transition(model, dataset, device, batch_size: int) -> float:
+    model.eval()
+    loader = DataLoader(dataset, batch_size=batch_size)
+    correct = 0.0
+    total = 0.0
+    for batch in loader:
+        values = batch["variable_trace_values"].to(device)
+        mask = batch["variable_trace_mask"].to(device)
+        op_ids = batch["variable_trace_op_ids"].to(device)
+        pred = model.standalone_transition.predict_value(
+            values[:, :, 0].reshape(-1),
+            op_ids.reshape(-1),
+            values[:, :, 1].reshape(-1),
+        ).view_as(mask)
+        target = values[:, :, 2].round().long()
+        correct += float(((pred == target).float() * mask).sum().item())
+        total += float(mask.sum().item())
+    return correct / max(total, 1.0)
+
+
+@torch.no_grad()
 def evaluate_trace(model, dataset, tokenizer, device, batch_size: int) -> float:
     if not model.use_reasoning_trace:
         return 0.0
@@ -567,6 +588,12 @@ def run_stage(
                     variable_trace_legal_mask,
                     variable_trace_mask,
                 )
+            elif name == "standalone_transition":
+                out = model.standalone_transition_loss(
+                    variable_trace_op_ids,
+                    variable_trace_values,
+                    variable_trace_mask,
+                )
             elif name in {"state_conditioned_latent", "state_conditioned_joint"}:
                 out = model.state_conditioned_latent_loss(
                     problem_ids,
@@ -676,6 +703,11 @@ def run_stage(
                     }
                     else 0.0
                 )
+                standalone_transition_acc = (
+                    evaluate_standalone_transition(model, val_dataset, device, batch_size)
+                    if name == "standalone_transition"
+                    else 0.0
+                )
                 metrics = " ".join(
                     f"{key}={value.item():.4f}"
                     for key, value in out.items()
@@ -699,6 +731,7 @@ def run_stage(
                         "variable_raw_value_acc",
                         "variable_digit_value_acc",
                         "variable_class_value_acc",
+                        "standalone_transition_acc",
                     }
                 )
                 print(
@@ -714,7 +747,8 @@ def run_stage(
                     f"answer_value_acc={answer_value_acc:.3f} "
                     f"trace_state_final_acc={trace_state_final_acc:.3f} "
                     f"step_state_final_acc={step_state_final_acc:.3f} "
-                    f"variable_unconstrained_trace_equiv={variable_unconstrained_trace_acc:.3f}"
+                    f"variable_unconstrained_trace_equiv={variable_unconstrained_trace_acc:.3f} "
+                    f"standalone_transition_val_acc={standalone_transition_acc:.3f}"
                 )
                 op_metrics = " ".join(
                     f"{key}={value:.3f}"
@@ -740,6 +774,7 @@ def run_stage(
                     "variable_raw_value_head",
                     "variable_digit_value_head",
                     "variable_class_value_head",
+                    "standalone_transition",
                     "state_conditioned_latent",
                     "state_conditioned_joint",
                     "value_conditioned_latent",
@@ -768,6 +803,8 @@ def run_stage(
                         model, val_dataset, tokenizer, device, batch_size
                     )
                     if name == "reasoning_sequence"
+                    else standalone_transition_acc
+                    if name == "standalone_transition"
                     else variable_unconstrained_trace_acc
                     + 0.001 * float(out.get("variable_class_value_acc", torch.tensor(0.0)).item())
                     if name == "variable_class_value_head"
@@ -1368,6 +1405,32 @@ def main() -> None:
         )
         best_acc = run_stage(
             name="variable_class_value_head",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.variable_reasoner_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
+
+    if "standalone_transition" in requested_stages or "sat" in requested_stages:
+        for module in model.children():
+            _set_trainable(module, False)
+        _set_trainable(model.standalone_transition, True)
+        optimizer = torch.optim.AdamW(
+            model.standalone_transition.parameters(),
+            lr=args.lr,
+            weight_decay=0.01,
+        )
+        best_acc = run_stage(
+            name="standalone_transition",
             model=model,
             loader=loader,
             val_dataset=val_dataset,

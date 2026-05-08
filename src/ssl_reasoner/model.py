@@ -26,6 +26,101 @@ MATH_FEATURE_TIMES_ID = 204
 TRACE_ID_TO_OP = ("", "+", "-", "*")
 
 
+class StandaloneArithmeticTransition(nn.Module):
+    def __init__(self, d_model: int):
+        super().__init__()
+        self.value_embed = nn.Embedding(TRANSITION_VALUE_CLASSES, d_model)
+        self.lhs_proj = nn.Sequential(
+            nn.Linear(d_model + 3, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+        )
+        self.rhs_proj = nn.Sequential(
+            nn.Linear(d_model + 3, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+        )
+        self.op_embed = nn.Embedding(4, d_model)
+        self.net = nn.Sequential(
+            nn.LayerNorm(d_model * 3),
+            nn.Linear(d_model * 3, d_model * 4),
+            nn.GELU(),
+            nn.Linear(d_model * 4, d_model * 2),
+            nn.GELU(),
+            nn.Linear(d_model * 2, TRANSITION_VALUE_CLASSES),
+        )
+
+    @staticmethod
+    def _number_features(values: torch.Tensor) -> torch.Tensor:
+        values = values.to(torch.float)
+        return torch.stack(
+            [
+                values / 1000.0,
+                values.abs().clamp(max=10000.0).log1p() / 10.0,
+                values.lt(0).to(torch.float),
+            ],
+            dim=-1,
+        )
+
+    def _value_representation(self, values: torch.Tensor) -> torch.Tensor:
+        class_ids = self.value_to_class(values)
+        return torch.cat([self.value_embed(class_ids), self._number_features(values)], dim=-1)
+
+    @staticmethod
+    def value_to_class(values: torch.Tensor) -> torch.Tensor:
+        return values.round().long().clamp(
+            min=TRANSITION_VALUE_MIN,
+            max=TRANSITION_VALUE_MAX,
+        ) - TRANSITION_VALUE_MIN
+
+    @staticmethod
+    def class_to_value(class_ids: torch.Tensor) -> torch.Tensor:
+        return class_ids.long() + TRANSITION_VALUE_MIN
+
+    def forward(
+        self,
+        lhs: torch.Tensor,
+        op_ids: torch.Tensor,
+        rhs: torch.Tensor,
+    ) -> torch.Tensor:
+        lhs_h = self.lhs_proj(self._value_representation(lhs))
+        rhs_h = self.rhs_proj(self._value_representation(rhs))
+        op_h = self.op_embed(op_ids.clamp(min=0, max=3).long())
+        return self.net(torch.cat([lhs_h, op_h, rhs_h], dim=-1))
+
+    def loss(
+        self,
+        lhs: torch.Tensor,
+        op_ids: torch.Tensor,
+        rhs: torch.Tensor,
+        result: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        logits = self(lhs.reshape(-1), op_ids.reshape(-1), rhs.reshape(-1))
+        targets = self.value_to_class(result.reshape(-1))
+        flat_mask = mask.reshape(-1)
+        per_row = F.cross_entropy(logits, targets, reduction="none")
+        loss = (per_row * flat_mask).sum() / flat_mask.sum().clamp(min=1.0)
+        pred = self.class_to_value(logits.argmax(dim=-1))
+        acc = (
+            (pred == result.reshape(-1).round().long()).float() * flat_mask
+        ).sum() / flat_mask.sum().clamp(min=1.0)
+        return {
+            "loss": loss,
+            "standalone_transition_loss": loss,
+            "standalone_transition_acc": acc,
+        }
+
+    @torch.no_grad()
+    def predict_value(
+        self,
+        lhs: torch.Tensor,
+        op_ids: torch.Tensor,
+        rhs: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.class_to_value(self(lhs, op_ids, rhs).argmax(dim=-1))
+
+
 class MeanPoolEncoder(nn.Module):
     def __init__(
         self,
@@ -988,6 +1083,7 @@ class MathJEPAReadout(nn.Module):
         self.variable_structured_reasoner = VariableStructuredReasoner(
             math_vocab_size, d_model, max_math_len, max_steps=max_variable_steps
         )
+        self.standalone_transition = StandaloneArithmeticTransition(d_model)
         self.state_conditioned_projector = StateConditionedSlotProjector(
             d_model, num_slots
         )
@@ -1382,6 +1478,20 @@ class MathJEPAReadout(nn.Module):
             variable_trace_position_ids,
             variable_trace_values,
             variable_trace_legal_mask,
+            variable_trace_mask,
+        )
+
+    def standalone_transition_loss(
+        self,
+        variable_trace_op_ids: torch.Tensor,
+        variable_trace_values: torch.Tensor,
+        variable_trace_mask: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        return self.standalone_transition.loss(
+            variable_trace_values[:, :, 0],
+            variable_trace_op_ids,
+            variable_trace_values[:, :, 1],
+            variable_trace_values[:, :, 2],
             variable_trace_mask,
         )
 
@@ -2185,6 +2295,7 @@ class MathJEPAReadout(nn.Module):
         raw_learned_values: bool = False,
         digit_learned_values: bool = False,
         class_learned_values: bool = False,
+        standalone_learned_values: bool = False,
     ) -> list[str]:
         math_rows = math_ids.detach().cpu().tolist()
         hidden_rows = self.variable_structured_reasoner.initial_hidden(math_ids)
@@ -2240,7 +2351,16 @@ class MathJEPAReadout(nn.Module):
                     result = lhs * rhs
                 else:
                     break
-                if class_learned_values:
+                if standalone_learned_values:
+                    lhs_tensor = torch.tensor([lhs], device=math_ids.device)
+                    rhs_tensor = torch.tensor([rhs], device=math_ids.device)
+                    standalone_result = self.standalone_transition.predict_value(
+                        lhs_tensor,
+                        torch.tensor([op_id], device=math_ids.device),
+                        rhs_tensor,
+                    )
+                    result = int(standalone_result[0].item())
+                elif class_learned_values:
                     lhs_tensor = torch.tensor([lhs], device=math_ids.device)
                     rhs_tensor = torch.tensor([rhs], device=math_ids.device)
                     class_result = self.variable_structured_reasoner.class_result_for_values(

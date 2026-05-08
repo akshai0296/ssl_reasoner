@@ -665,6 +665,9 @@ def test_variable_reasoner_has_raw_value_head():
     assert out["variable_digit_value_acc"].ndim == 0
     assert out["variable_class_value_loss"].ndim == 0
     assert out["variable_class_value_acc"].ndim == 0
+    standalone = model.standalone_transition_loss(op_ids, values, step_mask)
+    assert standalone["loss"].ndim == 0
+    assert standalone["standalone_transition_acc"].ndim == 0
 
 
 def test_variable_reasoner_digit_value_round_trip():
@@ -691,6 +694,19 @@ def test_variable_reasoner_class_value_round_trip():
     decoded = reasoner.transition_class_to_value(class_ids)
 
     assert decoded.tolist() == [-91, 0, 22, 4127]
+
+
+def test_standalone_transition_forward():
+    model = MathJEPAReadout(
+        vocab_size=build_math_tokenizer().vocab_size,
+        max_variable_steps=4,
+    )
+    lhs = torch.tensor([3.0, 8.0, 44.0])
+    op_ids = torch.tensor([1, 3, 2])
+    rhs = torch.tensor([8.0, 2.0, 7.0])
+    logits = model.standalone_transition(lhs, op_ids, rhs)
+
+    assert logits.shape[0] == 3
 
 
 def test_latent_verifier_forward():
