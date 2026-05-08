@@ -303,7 +303,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--checkpoint",
-        default="checkpoints/step_state_solver_mixed_only/best.pt",
+        default="checkpoints/variable_reasoner/best.pt",
     )
     parser.add_argument("--samples", type=int, default=500)
     parser.add_argument("--batch-size", type=int, default=64)
