@@ -143,6 +143,19 @@ def test_trace_respects_multiplication_precedence():
     )
 
 
+def test_structured_state_renderer_formats_reasoning_trace():
+    assert MathJEPAReadout._render_step_state_row(
+        encode_math_features("20+1*0"),
+        [0.0, 20.0],
+        order_id=1,
+    ) == "1*0=0,20+0=20,20"
+    assert MathJEPAReadout._render_step_state_row(
+        encode_math_features("49-5+19"),
+        [44.0, 63.0],
+        order_id=0,
+    ) == "49-5=44,44+19=63,63"
+
+
 def test_symbolic_candidate_texts_include_precedence_and_variants():
     candidates = symbolic_candidate_texts("Find the value of 20+1*0.", base_prediction="19")
     assert candidates[0] == "20"

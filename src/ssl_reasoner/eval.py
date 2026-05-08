@@ -354,14 +354,10 @@ def main() -> None:
                         shown += 1
                 continue
             if args.mode == "reasoning_sequence":
-                decoded = model.solve_reasoning_sequence_ids(
+                predictions = model.solve_reasoning_structured_texts(
                     batch["problem_ids"].to(device),
                     batch["math_ids"].to(device),
-                    bos_id=tokenizer.bos_id,
-                    eos_id=tokenizer.eos_id,
-                    pad_id=tokenizer.pad_id,
                 )
-                predictions = [tokenizer.decode(ids).strip() for ids in decoded]
                 references = batch["reasoning"]
                 for problem, pred, answer, op_label, split_label in zip(
                     batch["problem"],

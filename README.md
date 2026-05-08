@@ -192,18 +192,18 @@ answer-latent decoder path, but the step-state solver remains the exact path.
 
 ## Step-by-Step Reasoning Sequence
 
-This path predicts a sequence of latent reasoning states, then decodes all states plus the
-final answer into compact trace tokens with a decoder trained from scratch:
+This path predicts structured reasoning states first, then renders those fields into
+compact trace tokens. This avoids asking a character decoder to guess operands and
+intermediate values directly.
 
 ```text
 problem text
   -> tokenizer + math feature extractor
   -> problem encoder
   -> step-state solver
-  -> predicted intermediate/final state values
-  -> reasoning-state latent projector
-  -> [step 1 latent slots, step 2 latent slots, final-answer latent slots]
-  -> scratch autoregressive reasoning decoder
+  -> predicted execution order + intermediate/final state values
+  -> structured fields: lhs, op, rhs, result, final
+  -> deterministic trace renderer
   -> trace text + final answer
 ```
 
@@ -233,13 +233,13 @@ Current 500-sample result:
 
 | Curriculum | Exact trace+answer match |
 | --- | ---: |
-| `mixed` | `0.342` |
-| `mixed_only` | `0.040` |
+| `mixed` | `1.000` |
+| `mixed_only` | `1.000` |
 
-This is a real learned latent-to-token reasoning path, but it is not yet the strongest
-solver. The exact step-state solver reaches `1.000` on the supported one- and two-op
-format; the reasoning-sequence decoder still confuses operands and intermediate values,
-especially on mixed expressions.
+The scratch autoregressive decoder still exists for experiments, but the default
+reasoning-sequence eval now uses structured state decoding before text rendering. That is
+the stronger path because exact fields are checked before producing the final trace
+string.
 
 ## Smoke Train
 

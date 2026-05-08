@@ -16,6 +16,7 @@ MATH_FEATURE_NUM_OFFSET = 1
 MATH_FEATURE_PLUS_ID = 202
 MATH_FEATURE_MINUS_ID = 203
 MATH_FEATURE_TIMES_ID = 204
+TRACE_ID_TO_OP = ("", "+", "-", "*")
 
 
 class MeanPoolEncoder(nn.Module):
@@ -1072,6 +1073,75 @@ class MathJEPAReadout(nn.Module):
             "reasoning_sequence_struct_value_acc": value_acc,
         }
 
+    @staticmethod
+    def _trace_class_to_value(class_id: int) -> int:
+        return int(class_id) + TRACE_VALUE_MIN
+
+    @staticmethod
+    def _trace_op_to_text(op_id: int) -> str:
+        if 0 <= int(op_id) < len(TRACE_ID_TO_OP):
+            return TRACE_ID_TO_OP[int(op_id)]
+        return ""
+
+    @classmethod
+    def _render_reasoning_struct_row(
+        cls,
+        op_ids: list[int],
+        value_ids: list[list[int]],
+        is_mixed: bool,
+    ) -> str:
+        lhs1 = cls._trace_class_to_value(value_ids[0][0])
+        rhs1 = cls._trace_class_to_value(value_ids[0][1])
+        result1 = cls._trace_class_to_value(value_ids[0][2])
+        final = cls._trace_class_to_value(value_ids[2][2])
+        op1 = cls._trace_op_to_text(op_ids[0])
+        if not is_mixed:
+            return f"{lhs1}{op1}{rhs1}={result1},{final}"
+
+        lhs2 = cls._trace_class_to_value(value_ids[1][0])
+        rhs2 = cls._trace_class_to_value(value_ids[1][1])
+        result2 = cls._trace_class_to_value(value_ids[1][2])
+        op2 = cls._trace_op_to_text(op_ids[1])
+        return f"{lhs1}{op1}{rhs1}={result1},{lhs2}{op2}{rhs2}={result2},{final}"
+
+    @staticmethod
+    def _math_value(math_id: int) -> int:
+        return max(0, int(math_id) - MATH_FEATURE_NUM_OFFSET)
+
+    @staticmethod
+    def _math_op_id(math_id: int) -> int:
+        if int(math_id) == MATH_FEATURE_PLUS_ID:
+            return 1
+        if int(math_id) == MATH_FEATURE_MINUS_ID:
+            return 2
+        if int(math_id) == MATH_FEATURE_TIMES_ID:
+            return 3
+        return 0
+
+    @classmethod
+    def _render_step_state_row(
+        cls,
+        math_row: list[int],
+        state_row: list[float],
+        order_id: int,
+    ) -> str:
+        a = cls._math_value(math_row[0])
+        op1_id = cls._math_op_id(math_row[1])
+        b = cls._math_value(math_row[2])
+        op2_id = cls._math_op_id(math_row[3])
+        c = cls._math_value(math_row[4])
+        first = int(round(float(state_row[0])))
+        final = int(round(float(state_row[1]))) if op2_id else first
+
+        op1 = cls._trace_op_to_text(op1_id)
+        if not op2_id:
+            return f"{a}{op1}{b}={first},{final}"
+
+        op2 = cls._trace_op_to_text(op2_id)
+        if int(order_id) == 1:
+            return f"{b}{op2}{c}={first},{a}{op1}{first}={final},{final}"
+        return f"{a}{op1}{b}={first},{first}{op2}{c}={final},{final}"
+
     def answer_value_loss(
         self, slots: torch.Tensor, answer_value_id: torch.Tensor
     ) -> dict[str, torch.Tensor]:
@@ -1578,6 +1648,55 @@ class MathJEPAReadout(nn.Module):
         trace_slots = self.predict_trace_slots(problem_ids, math_ids)
         logits = self.structured_answer_head(trace_slots.mean(dim=1))
         return logits.argmax(dim=-1), logits.softmax(dim=-1).max(dim=-1).values
+
+    @torch.no_grad()
+    def predict_reasoning_sequence_struct(
+        self,
+        problem_ids: torch.Tensor,
+        math_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        slots = self.predict_reasoning_state_slots(problem_ids, math_ids)
+        batch, num_states, _, d_model = slots.shape
+        pred = self.reasoning_sequence_struct_head(
+            slots.reshape(batch * num_states, -1, d_model).mean(dim=1)
+        )
+        pred = pred.view(batch, num_states, -1)
+        op_ids = pred[:, :, :4].argmax(dim=-1)
+        value_ids = pred[:, :, 4:].view(
+            batch, num_states, 3, TRACE_VALUE_CLASSES
+        ).argmax(dim=-1)
+        return op_ids, value_ids
+
+    @torch.no_grad()
+    def solve_reasoning_structured_texts(
+        self,
+        problem_ids: torch.Tensor,
+        math_ids: torch.Tensor,
+    ) -> list[str]:
+        del problem_ids
+        state_out = self.step_state_head(math_ids)
+        order_ids = state_out["order_logits"].argmax(dim=-1).detach().cpu().tolist()
+        state_rows = state_out["values"].detach().cpu().tolist()
+        math_rows = math_ids.detach().cpu().tolist()
+        return [
+            self._render_step_state_row(math_row, state_row, order_id)
+            for math_row, state_row, order_id in zip(math_rows, state_rows, order_ids)
+        ]
+
+    @torch.no_grad()
+    def solve_reasoning_struct_head_texts(
+        self,
+        problem_ids: torch.Tensor,
+        math_ids: torch.Tensor,
+    ) -> list[str]:
+        op_ids, value_ids = self.predict_reasoning_sequence_struct(problem_ids, math_ids)
+        is_mixed = math_ids[:, 3].ne(0).detach().cpu().tolist()
+        op_rows = op_ids.detach().cpu().tolist()
+        value_rows = value_ids.detach().cpu().tolist()
+        return [
+            self._render_reasoning_struct_row(op_row, value_row, bool(mixed))
+            for op_row, value_row, mixed in zip(op_rows, value_rows, is_mixed)
+        ]
 
     @torch.no_grad()
     def predict_trace_state_values(

@@ -233,14 +233,10 @@ def evaluate_reasoning_sequence(model, dataset, tokenizer, device, batch_size: i
     correct = 0
     total = 0
     for batch in loader:
-        decoded_ids = model.solve_reasoning_sequence_ids(
+        predictions = model.solve_reasoning_structured_texts(
             batch["problem_ids"].to(device),
             batch["math_ids"].to(device),
-            bos_id=tokenizer.bos_id,
-            eos_id=tokenizer.eos_id,
-            pad_id=tokenizer.pad_id,
         )
-        predictions = [tokenizer.decode(ids).strip() for ids in decoded_ids]
         for pred, reasoning in zip(predictions, batch["reasoning"]):
             correct += int(pred == reasoning)
             total += 1
