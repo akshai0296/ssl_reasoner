@@ -99,6 +99,46 @@ def make_variable_trace_steps_with_positions(
     return steps
 
 
+def make_variable_trace_steps_with_legal_masks(
+    expr: str,
+    max_steps: int = 4,
+) -> tuple[list[tuple[int, str, int, int, int]], list[list[float]]]:
+    parts = re.split(r"([+\-*])", expr)
+    values = [int(parts[idx]) for idx in range(0, len(parts), 2)]
+    ops = [parts[idx] for idx in range(1, len(parts), 2)]
+    steps: list[tuple[int, str, int, int, int]] = []
+    legal_masks: list[list[float]] = []
+
+    while ops and len(steps) < max_steps:
+        if "*" in ops:
+            legal = [1.0 if op == "*" else 0.0 for op in ops]
+            position = ops.index("*")
+        else:
+            legal = [1.0] + [0.0] * (len(ops) - 1)
+            position = 0
+
+        lhs = values[position]
+        rhs = values[position + 1]
+        op = ops[position]
+        if op == "+":
+            result = lhs + rhs
+        elif op == "-":
+            result = lhs - rhs
+        elif op == "*":
+            result = lhs * rhs
+        else:
+            raise ValueError(f"Unsupported operator: {op}")
+
+        padded_legal = legal[:max_steps]
+        padded_legal.extend([0.0] * (max_steps - len(padded_legal)))
+        legal_masks.append(padded_legal)
+        steps.append((lhs, op, rhs, result, position))
+        values[position : position + 2] = [result]
+        del ops[position]
+
+    return steps, legal_masks
+
+
 def make_trace(expr: str) -> str:
     return " ".join(
         f"{lhs}{op}{rhs}={result}"
@@ -123,7 +163,7 @@ def make_variable_trace_fields(
     expr: str,
     max_steps: int = 4,
 ) -> tuple[list[int], list[int], list[list[float]], list[float]]:
-    steps = make_variable_trace_steps_with_positions(expr)[:max_steps]
+    steps, legal_masks = make_variable_trace_steps_with_legal_masks(expr, max_steps)
     op_ids = [TRACE_OP_TO_ID[op] for _, op, _, _, _ in steps]
     position_ids = [position for *_, position in steps]
     values = [[float(lhs), float(rhs), float(result)] for lhs, _, rhs, result, _ in steps]
@@ -132,8 +172,9 @@ def make_variable_trace_fields(
         op_ids.append(TRACE_OP_TO_ID["none"])
         position_ids.append(0)
         values.append([0.0, 0.0, 0.0])
+        legal_masks.append([0.0] * max_steps)
         mask.append(0.0)
-    return op_ids, position_ids, values, mask
+    return op_ids, position_ids, values, legal_masks, mask
 
 
 def _value_to_class(value: float) -> int:
@@ -401,6 +442,7 @@ class MathDataset(Dataset):
             variable_trace_op_ids,
             variable_trace_position_ids,
             variable_trace_values,
+            variable_trace_legal_mask,
             variable_trace_mask,
         ) = (
             make_variable_trace_fields(expr)
@@ -430,6 +472,9 @@ class MathDataset(Dataset):
                 variable_trace_position_ids, dtype=torch.long
             ),
             "variable_trace_values": torch.tensor(variable_trace_values, dtype=torch.float),
+            "variable_trace_legal_mask": torch.tensor(
+                variable_trace_legal_mask, dtype=torch.float
+            ),
             "variable_trace_mask": torch.tensor(variable_trace_mask, dtype=torch.float),
             "reasoning_step_ids": torch.tensor(reasoning_step_ids, dtype=torch.long),
             "reasoning_step_mask": torch.tensor(reasoning_step_mask, dtype=torch.float),

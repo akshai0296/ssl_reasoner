@@ -10,6 +10,7 @@ from ssl_reasoner.data import (
     make_trace_fields,
     make_reasoning_text,
     make_reasoning_step_texts,
+    make_variable_trace_fields,
     make_variable_trace_steps,
     make_trace_state_targets,
 )
@@ -168,6 +169,14 @@ def test_variable_trace_steps_follow_precedence():
         (2, "+", 12, 14),
         (14, "-", 1, 13),
     ]
+    _, positions, _, legal_masks, mask = make_variable_trace_fields("2+3*4-1")
+    assert positions[:3] == [1, 0, 0]
+    assert legal_masks[:3] == [
+        [0.0, 1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0, 0.0],
+    ]
+    assert mask[:3] == [1.0, 1.0, 1.0]
 
 
 def test_symbolic_candidate_texts_include_precedence_and_variants():

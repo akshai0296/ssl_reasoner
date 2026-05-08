@@ -493,6 +493,7 @@ class VariableStructuredReasoner(nn.Module):
         op_targets: torch.Tensor,
         position_targets: torch.Tensor,
         value_targets: torch.Tensor,
+        legal_position_targets: torch.Tensor,
         step_mask: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         out = self(math_ids)
@@ -509,6 +510,12 @@ class VariableStructuredReasoner(nn.Module):
             reduction="none",
         ).view_as(step_mask)
         position_loss = (position_loss * step_mask).sum() / step_mask.sum().clamp(min=1.0)
+        legal_loss = F.binary_cross_entropy_with_logits(
+            out["position_logits"],
+            legal_position_targets,
+            reduction="none",
+        ).mean(dim=-1)
+        legal_loss = (legal_loss * step_mask).sum() / step_mask.sum().clamp(min=1.0)
         value_loss = F.smooth_l1_loss(
             out["values"] / VARIABLE_REASONING_SCALE,
             value_targets / VARIABLE_REASONING_SCALE,
@@ -523,18 +530,24 @@ class VariableStructuredReasoner(nn.Module):
         position_acc = (
             (out["position_logits"].argmax(dim=-1) == position_targets).float() * step_mask
         ).sum() / step_mask.sum().clamp(min=1.0)
+        legal_pred = out["position_logits"].sigmoid().ge(0.5).float()
+        legal_acc = (
+            (legal_pred == legal_position_targets).float().mean(dim=-1) * step_mask
+        ).sum() / step_mask.sum().clamp(min=1.0)
         value_acc = (
             (out["values"].round() == value_targets).float().mean(dim=-1) * step_mask
         ).sum() / step_mask.sum().clamp(min=1.0)
         return {
-            "loss": active_loss + op_loss + position_loss + 0.05 * value_loss,
+            "loss": active_loss + op_loss + position_loss + legal_loss + 0.05 * value_loss,
             "variable_active_loss": active_loss,
             "variable_op_loss": op_loss,
             "variable_position_loss": position_loss,
+            "variable_legal_loss": legal_loss,
             "variable_value_loss": value_loss,
             "variable_active_acc": active_acc,
             "variable_op_acc": op_acc,
             "variable_position_acc": position_acc,
+            "variable_legal_acc": legal_acc,
             "variable_value_acc": value_acc,
         }
 
@@ -1021,6 +1034,7 @@ class MathJEPAReadout(nn.Module):
         variable_trace_op_ids: torch.Tensor,
         variable_trace_position_ids: torch.Tensor,
         variable_trace_values: torch.Tensor,
+        variable_trace_legal_mask: torch.Tensor,
         variable_trace_mask: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         return self.variable_structured_reasoner.loss(
@@ -1028,6 +1042,7 @@ class MathJEPAReadout(nn.Module):
             variable_trace_op_ids,
             variable_trace_position_ids,
             variable_trace_values,
+            variable_trace_legal_mask,
             variable_trace_mask,
         )
 

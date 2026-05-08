@@ -350,6 +350,7 @@ def run_stage(
             variable_trace_op_ids = batch["variable_trace_op_ids"].to(device)
             variable_trace_position_ids = batch["variable_trace_position_ids"].to(device)
             variable_trace_values = batch["variable_trace_values"].to(device)
+            variable_trace_legal_mask = batch["variable_trace_legal_mask"].to(device)
             variable_trace_mask = batch["variable_trace_mask"].to(device)
             reasoning_step_ids = batch["reasoning_step_ids"].to(device)
             reasoning_step_mask = batch["reasoning_step_mask"].to(device)
@@ -481,6 +482,7 @@ def run_stage(
                     variable_trace_op_ids,
                     variable_trace_position_ids,
                     variable_trace_values,
+                    variable_trace_legal_mask,
                     variable_trace_mask,
                 )
             elif name in {"state_conditioned_latent", "state_conditioned_joint"}:
@@ -594,6 +596,7 @@ def run_stage(
                         "variable_active_acc",
                         "variable_op_acc",
                         "variable_position_acc",
+                        "variable_legal_acc",
                         "variable_value_acc",
                     }
                 )

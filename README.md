@@ -316,13 +316,13 @@ Current learned baseline result:
 | Metric | Score |
 | --- | ---: |
 | answer exact | `1.000` |
-| learned trace exact | `0.360` |
+| learned trace exact | `0.372` |
 
 The answer remains exact because the solver still uses the parser fallback for final
 answers on longer expressions. The learned recurrent trace head now predicts which
 adjacent operation to reduce next, then an exact transition cell executes `+`, `-`, or
-`*`. The remaining errors are mostly precedence/order mistakes, not arithmetic execution
-mistakes.
+`*`. It also receives legal-position supervision for precedence. The remaining errors are
+mostly chosen-position mistakes, not arithmetic execution mistakes.
 
 ## Smoke Train
 
