@@ -97,18 +97,22 @@ class StandaloneArithmeticTransition(nn.Module):
         mask: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         logits = self(lhs.reshape(-1), op_ids.reshape(-1), rhs.reshape(-1))
-        targets = self.value_to_class(result.reshape(-1))
-        flat_mask = mask.reshape(-1)
+        flat_result = result.reshape(-1)
+        targets = self.value_to_class(flat_result)
+        in_range = flat_result.ge(TRANSITION_VALUE_MIN) & flat_result.le(TRANSITION_VALUE_MAX)
+        flat_mask = mask.reshape(-1) * in_range.to(mask.dtype)
         per_row = F.cross_entropy(logits, targets, reduction="none")
         loss = (per_row * flat_mask).sum() / flat_mask.sum().clamp(min=1.0)
         pred = self.class_to_value(logits.argmax(dim=-1))
         acc = (
-            (pred == result.reshape(-1).round().long()).float() * flat_mask
+            (pred == flat_result.round().long()).float() * flat_mask
         ).sum() / flat_mask.sum().clamp(min=1.0)
+        coverage = flat_mask.sum() / mask.reshape(-1).sum().clamp(min=1.0)
         return {
             "loss": loss,
             "standalone_transition_loss": loss,
             "standalone_transition_acc": acc,
+            "standalone_transition_coverage": coverage,
         }
 
     @torch.no_grad()

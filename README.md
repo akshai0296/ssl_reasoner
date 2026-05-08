@@ -424,6 +424,7 @@ arithmetic first" direction:
 bash scripts/train_variable_digit_value_head.sh
 bash scripts/train_variable_class_value_head.sh
 bash scripts/train_standalone_transition.sh
+bash scripts/train_standalone_transition_reductions.sh
 ```
 
 The digit head predicts sign plus fixed decimal digits. The class head predicts a bounded
@@ -446,6 +447,11 @@ PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
   --checkpoint checkpoints/standalone_transition_single/best.pt \
   --standalone-learned-values \
   --preset in_dist
+
+PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
+  --checkpoint checkpoints/standalone_transition_reductions/best.pt \
+  --standalone-learned-values \
+  --preset all
 ```
 
 Measured single-step answer exact on 500 generated `single_op_balanced` examples:
@@ -468,9 +474,37 @@ Standalone by-op breakdown on that eval:
 Plugging the single-step standalone transition directly into multi-step in-distribution
 reasoning gives `0.310` answer exact. The remaining gap is expected: multi-step traces
 create intermediate negative and large states that are not covered well by the
-single-step curriculum. The next raw-arithmetic step is to train this standalone
-transition on the full reduction-state distribution, then use it in the variable
-reasoner.
+single-step curriculum.
+
+Training the same standalone transition on the full reduction-state distribution improves
+multi-step reasoning substantially. Out-of-range transition targets outside
+`-1000..10000` are masked during training/eval instead of clamped.
+
+Current `checkpoints/standalone_transition_reductions/best.pt` results:
+
+| Eval | Answer exact |
+| --- | ---: |
+| in-dist multi-step, 500 samples | `0.678` |
+| in-dist multi-step, 200 samples | `0.650` |
+| longer expressions | `0.585` |
+| no multiply | `0.995` |
+| many multiply | `0.520` |
+| length 5 | `0.450` |
+| length 8 | `0.320` |
+| length 16 | `0.080` |
+| larger numbers | `0.000` |
+
+Single-step retention after reduction training is `0.914` overall:
+
+| Op | Exact |
+| --- | ---: |
+| `+` | `0.844` |
+| `-` | `0.898` |
+| `*` | `1.000` |
+
+The reduction-trained standalone transition is now useful, but it still fails on larger
+numbers and long chains. The next improvement should expand the value representation
+beyond the bounded class range or add a digit/residual fallback for out-of-range states.
 
 ## Smoke Train
 

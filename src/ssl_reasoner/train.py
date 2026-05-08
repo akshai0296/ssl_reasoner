@@ -128,14 +128,16 @@ def evaluate_standalone_transition(model, dataset, device, batch_size: int) -> f
         values = batch["variable_trace_values"].to(device)
         mask = batch["variable_trace_mask"].to(device)
         op_ids = batch["variable_trace_op_ids"].to(device)
+        target = values[:, :, 2].round().long()
+        in_range = target.ge(-1000) & target.le(10000)
+        eval_mask = mask * in_range.to(mask.dtype)
         pred = model.standalone_transition.predict_value(
             values[:, :, 0].reshape(-1),
             op_ids.reshape(-1),
             values[:, :, 1].reshape(-1),
         ).view_as(mask)
-        target = values[:, :, 2].round().long()
-        correct += float(((pred == target).float() * mask).sum().item())
-        total += float(mask.sum().item())
+        correct += float(((pred == target).float() * eval_mask).sum().item())
+        total += float(eval_mask.sum().item())
     return correct / max(total, 1.0)
 
 
@@ -732,6 +734,7 @@ def run_stage(
                         "variable_digit_value_acc",
                         "variable_class_value_acc",
                         "standalone_transition_acc",
+                        "standalone_transition_coverage",
                     }
                 )
                 print(
