@@ -697,6 +697,7 @@ def test_latent_reasoning_sequence_loss_and_decode():
     batch = [dataset[i] for i in range(4)]
     math_ids = torch.stack([item["math_ids"] for item in batch])
     op_ids = torch.stack([item["variable_trace_op_ids"] for item in batch])
+    position_ids = torch.stack([item["variable_trace_position_ids"] for item in batch])
     values = torch.stack([item["variable_trace_values"] for item in batch])
     step_mask = torch.stack([item["variable_trace_mask"] for item in batch])
 
@@ -706,7 +707,13 @@ def test_latent_reasoning_sequence_loss_and_decode():
         max_variable_steps=16,
         use_math_features=True,
     )
-    out = model.latent_reasoning_sequence_loss(math_ids, op_ids, values, step_mask)
+    out = model.latent_reasoning_sequence_loss(
+        math_ids,
+        op_ids,
+        position_ids,
+        values,
+        step_mask,
+    )
     pred_active, pred_ops, pred_values = model.latent_reasoning_sequence.predict_structured(
         math_ids
     )
@@ -729,6 +736,10 @@ def test_latent_reasoning_sequence_loss_and_decode():
     assert out["latent_reasoning_process_final_acc"].ndim == 0
     assert out["latent_reasoning_process_digit_acc"].ndim == 0
     assert out["latent_reasoning_process_carry_acc"].ndim == 0
+    assert out["latent_reasoning_state_value_acc"].ndim == 0
+    assert out["latent_reasoning_state_value_active_acc"].ndim == 0
+    assert out["latent_reasoning_state_op_acc"].ndim == 0
+    assert out["latent_reasoning_state_op_active_acc"].ndim == 0
     assert pred_active.shape == (4, 17)
     assert pred_ops.shape == (4, 17)
     assert pred_values.shape == (4, 17, 3)

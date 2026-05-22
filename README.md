@@ -481,6 +481,43 @@ answer accuracy on several splits. The model is still not exact because it needs
 state-transition objective that explicitly predicts the next expression state after each
 reduction, not only isolated step tuples.
 
+The state-transition objective adds auxiliary heads on each predicted latent reasoning
+state. After every reduction, the latent state must predict the remaining expression's
+value slots, operator slots, and active masks. This trains the representation to carry
+the post-step expression state, not only the local `(lhs, op, rhs, result)` tuple.
+Starting from `checkpoints/latent_reasoning_sequence_hardneg_smoke/best.pt` with partial
+loading and training for 1000 steps gives:
+
+| Metric | Step 1 | Step 1000 |
+| --- | ---: | ---: |
+| class value accuracy | `0.440` | `0.523` |
+| class final accuracy | `0.312` | `0.484` |
+| process-conditioned value accuracy | `0.416` | `0.498` |
+| process-conditioned final accuracy | `0.312` | `0.500` |
+| state value exact accuracy | `0.009` | `0.010` |
+| state value active accuracy | `0.512` | `0.992` |
+| state op accuracy | `0.242` | `0.496` |
+| state op active accuracy | `0.571` | `0.992` |
+
+Public 200-sample eval for
+`checkpoints/latent_reasoning_sequence_state_scaled_smoke/best.pt`:
+
+| Preset | Class answer | Class trace | Process answer | Process trace |
+| --- | ---: | ---: | ---: | ---: |
+| `in_dist` | `0.035` | `0.005` | `0.035` | `0.010` |
+| `larger_numbers` | `0.000` | `0.000` | `0.000` | `0.000` |
+| `longer_expr` | `0.020` | `0.000` | `0.025` | `0.005` |
+| `no_multiply` | `0.100` | `0.000` | `0.125` | `0.000` |
+| `many_multiply` | `0.115` | `0.070` | `0.115` | `0.070` |
+| `length_8` | `0.000` | `0.000` | `0.000` | `0.000` |
+| `length_16` | `0.000` | `0.000` | `0.000` | `0.000` |
+
+Interpretation: the state-transition objective substantially improves internal final
+value accuracy, and the external `no_multiply` process path improves to `0.125`. Exact
+state-value reconstruction is still poor because it uses direct regression over large
+integer states. The next refinement should decode state values with class or digit
+heads, or use the predicted state directly to constrain the next step selection.
+
 ## Training
 
 Smoke train:

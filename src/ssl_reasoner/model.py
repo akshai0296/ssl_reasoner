@@ -1537,6 +1537,30 @@ class LatentReasoningSequence(nn.Module):
             nn.GELU(),
             nn.Linear(d_model * 2, 3 * TRANSITION_VALUE_CLASSES),
         )
+        self.state_value_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, max_steps + 1),
+        )
+        self.state_value_active_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, max_steps + 1),
+        )
+        self.state_op_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, max_steps * 4),
+        )
+        self.state_op_active_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, max_steps),
+        )
 
     @staticmethod
     def value_to_sign_digits(values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1623,6 +1647,79 @@ class LatentReasoningSequence(nn.Module):
                 max=LATENT_REASONING_CARRY_CLASSES - 1
             )
         return result_digits, carry_targets, process_mask
+
+    @staticmethod
+    def expression_state_targets(
+        math_ids: torch.Tensor,
+        position_ids: torch.Tensor,
+        values: torch.Tensor,
+        step_mask: torch.Tensor,
+        max_steps: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch = math_ids.size(0)
+        state_count = max_steps + 1
+        state_values = values.new_zeros(batch, state_count, max_steps + 1)
+        state_value_mask = values.new_zeros(batch, state_count, max_steps + 1)
+        state_ops = position_ids.new_zeros(batch, state_count, max_steps)
+        state_op_mask = values.new_zeros(batch, state_count, max_steps)
+        math_rows = math_ids.detach().cpu().tolist()
+        positions = position_ids.detach().cpu().tolist()
+        value_rows = values.detach().cpu().tolist()
+        mask_rows = step_mask.detach().cpu().tolist()
+
+        for row_idx, math_row in enumerate(math_rows):
+            current_values: list[float] = []
+            current_ops: list[int] = []
+            for token_idx, token in enumerate(math_row):
+                if token == 0:
+                    continue
+                if token == MATH_FEATURE_PLUS_ID:
+                    current_ops.append(1)
+                elif token == MATH_FEATURE_MINUS_ID:
+                    current_ops.append(2)
+                elif token == MATH_FEATURE_TIMES_ID:
+                    current_ops.append(3)
+                elif token < MATH_FEATURE_PLUS_ID:
+                    current_values.append(float(token - MATH_FEATURE_NUM_OFFSET))
+
+            last_state_values = current_values[: max_steps + 1]
+            last_state_ops = current_ops[:max_steps]
+            for step_idx in range(max_steps):
+                if mask_rows[row_idx][step_idx] < 0.5:
+                    continue
+                position = int(positions[row_idx][step_idx])
+                if 0 <= position < len(current_ops) and position + 1 < len(current_values):
+                    result = float(value_rows[row_idx][step_idx][2])
+                    current_values[position : position + 2] = [result]
+                    del current_ops[position]
+                last_state_values = current_values[: max_steps + 1]
+                last_state_ops = current_ops[:max_steps]
+                value_len = len(last_state_values)
+                op_len = len(last_state_ops)
+                if value_len:
+                    state_values[row_idx, step_idx, :value_len] = values.new_tensor(
+                        last_state_values
+                    )
+                    state_value_mask[row_idx, step_idx, :value_len] = 1.0
+                if op_len:
+                    state_ops[row_idx, step_idx, :op_len] = position_ids.new_tensor(
+                        last_state_ops
+                    )
+                    state_op_mask[row_idx, step_idx, :op_len] = 1.0
+
+            value_len = len(last_state_values)
+            op_len = len(last_state_ops)
+            if value_len:
+                state_values[row_idx, -1, :value_len] = values.new_tensor(
+                    last_state_values
+                )
+                state_value_mask[row_idx, -1, :value_len] = 1.0
+            if op_len:
+                state_ops[row_idx, -1, :op_len] = position_ids.new_tensor(
+                    last_state_ops
+                )
+                state_op_mask[row_idx, -1, :op_len] = 1.0
+        return state_values, state_value_mask, state_ops, state_op_mask
 
     def _targets(
         self,
@@ -1725,6 +1822,7 @@ class LatentReasoningSequence(nn.Module):
         self,
         math_ids: torch.Tensor,
         op_ids: torch.Tensor,
+        position_ids: torch.Tensor,
         values: torch.Tensor,
         step_mask: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
@@ -1804,6 +1902,48 @@ class LatentReasoningSequence(nn.Module):
             process_carry_logits,
             process_value_logits,
         ) = self._decode(pred)
+        state_value_pred = self.state_value_head(pred)
+        state_value_active_logits = self.state_value_active_head(pred)
+        state_op_logits = self.state_op_head(pred).view(
+            pred.size(0),
+            pred.size(1),
+            self.max_steps,
+            4,
+        )
+        state_op_active_logits = self.state_op_active_head(pred)
+        state_values, state_value_mask, state_ops, state_op_mask = (
+            self.expression_state_targets(
+                math_ids,
+                position_ids,
+                values,
+                step_mask,
+                self.max_steps,
+            )
+        )
+        state_value_mask = state_value_mask * all_mask.unsqueeze(-1)
+        state_op_mask = state_op_mask * all_mask.unsqueeze(-1)
+        state_value_loss = F.smooth_l1_loss(
+            state_value_pred,
+            state_values / TRACE_STATE_SCALE,
+            reduction="none",
+        )
+        state_value_loss = (
+            state_value_loss * state_value_mask
+        ).sum() / state_value_mask.sum().clamp(min=1.0)
+        state_value_active_loss = F.binary_cross_entropy_with_logits(
+            state_value_active_logits,
+            state_value_mask,
+        )
+        state_op_loss = F.cross_entropy(
+            state_op_logits.reshape(-1, 4),
+            state_ops.reshape(-1),
+            reduction="none",
+        ).view_as(state_op_mask)
+        state_op_loss = (state_op_loss * state_op_mask).sum() / state_op_mask.sum().clamp(min=1.0)
+        state_op_active_loss = F.binary_cross_entropy_with_logits(
+            state_op_active_logits,
+            state_op_mask,
+        )
         active_loss = F.binary_cross_entropy_with_logits(active_logits, all_mask)
         value_targets = ReasoningStepTargetEncoder.value_to_class(all_values)
         sign_targets, digit_targets = self.value_to_sign_digits(all_values.reshape(-1))
@@ -1910,10 +2050,27 @@ class LatentReasoningSequence(nn.Module):
             (process_carry_logits.argmax(dim=-1) == process_carry_targets).float()
             * process_mask
         ).sum() / process_mask.sum().clamp(min=1.0)
+        rounded_state_values = (state_value_pred * TRACE_STATE_SCALE).round()
+        state_value_acc = (
+            (rounded_state_values == state_values).float() * state_value_mask
+        ).sum() / state_value_mask.sum().clamp(min=1.0)
+        state_value_active_acc = (
+            state_value_active_logits.sigmoid().ge(0.5) == state_value_mask.bool()
+        ).float().mean()
+        state_op_acc = (
+            (state_op_logits.argmax(dim=-1) == state_ops).float() * state_op_mask
+        ).sum() / state_op_mask.sum().clamp(min=1.0)
+        state_op_active_acc = (
+            state_op_active_logits.sigmoid().ge(0.5) == state_op_mask.bool()
+        ).float().mean()
         loss = (
             latent_loss
             + 0.2 * contrastive_loss
             + 0.5 * hard_loss
+            + 0.5 * state_value_loss
+            + state_value_active_loss
+            + state_op_loss
+            + state_op_active_loss
             + active_loss
             + op_loss
             + value_loss
@@ -1928,6 +2085,10 @@ class LatentReasoningSequence(nn.Module):
             "latent_reasoning_latent_loss": latent_loss,
             "latent_reasoning_contrastive_loss": contrastive_loss,
             "latent_reasoning_hard_negative_loss": hard_loss,
+            "latent_reasoning_state_value_loss": state_value_loss,
+            "latent_reasoning_state_value_active_loss": state_value_active_loss,
+            "latent_reasoning_state_op_loss": state_op_loss,
+            "latent_reasoning_state_op_active_loss": state_op_active_loss,
             "latent_reasoning_active_loss": active_loss,
             "latent_reasoning_op_loss": op_loss,
             "latent_reasoning_value_loss": value_loss,
@@ -1947,6 +2108,10 @@ class LatentReasoningSequence(nn.Module):
             "latent_reasoning_digit_final_acc": digit_final_acc,
             "latent_reasoning_process_digit_acc": process_digit_acc,
             "latent_reasoning_process_carry_acc": process_carry_acc,
+            "latent_reasoning_state_value_acc": state_value_acc,
+            "latent_reasoning_state_value_active_acc": state_value_active_acc,
+            "latent_reasoning_state_op_acc": state_op_acc,
+            "latent_reasoning_state_op_active_acc": state_op_active_acc,
         }
 
     @torch.no_grad()
@@ -2489,12 +2654,14 @@ class MathJEPAReadout(nn.Module):
         self,
         math_ids: torch.Tensor,
         variable_trace_op_ids: torch.Tensor,
+        variable_trace_position_ids: torch.Tensor,
         variable_trace_values: torch.Tensor,
         variable_trace_mask: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         return self.latent_reasoning_sequence.loss(
             math_ids,
             variable_trace_op_ids,
+            variable_trace_position_ids,
             variable_trace_values,
             variable_trace_mask,
         )

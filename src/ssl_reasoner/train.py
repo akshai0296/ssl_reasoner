@@ -597,6 +597,7 @@ def run_stage(
                 out = model.latent_reasoning_sequence_loss(
                     math_ids,
                     variable_trace_op_ids,
+                    variable_trace_position_ids,
                     variable_trace_values,
                     variable_trace_mask,
                 )
@@ -765,6 +766,10 @@ def run_stage(
                         "latent_reasoning_process_final_acc",
                         "latent_reasoning_process_digit_acc",
                         "latent_reasoning_process_carry_acc",
+                        "latent_reasoning_state_value_acc",
+                        "latent_reasoning_state_value_active_acc",
+                        "latent_reasoning_state_op_acc",
+                        "latent_reasoning_state_op_active_acc",
                     }
                 )
                 print(
