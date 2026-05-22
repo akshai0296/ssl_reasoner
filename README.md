@@ -339,6 +339,36 @@ Interpretation: direct digit decoding learns some value fields, but it is not be
 the class decoder yet. The next architectural step is explicit carry/borrow supervision
 for addition/subtraction and partial-product supervision for multiplication.
 
+The first arithmetic-process supervision pass adds per-place result digit targets and
+carry/borrow targets for supported nonnegative `+`, `-`, and `*` reductions. Starting
+from `checkpoints/latent_reasoning_sequence/best.pt` and training for 1000 steps gives:
+
+| Metric | Step 1 | Step 1000 |
+| --- | ---: | ---: |
+| class value accuracy | `0.344` | `0.395` |
+| class final accuracy | `0.141` | `0.219` |
+| digit value accuracy | `0.000` | `0.198` |
+| process digit accuracy | `0.095` | `0.578` |
+| process carry accuracy | `0.002` | `0.878` |
+
+Public eval for `checkpoints/latent_reasoning_sequence_process_smoke/best.pt` is still
+low:
+
+| Preset | Answer exact | Trace exact |
+| --- | ---: | ---: |
+| `in_dist` | `0.030` | `0.005` |
+| `larger_numbers` | `0.000` | `0.000` |
+| `longer_expr` | `0.015` | `0.000` |
+| `no_multiply` | `0.020` | `0.000` |
+| `many_multiply` | `0.055` | `0.040` |
+| `length_8` | `0.000` | `0.000` |
+| `length_16` | `0.000` | `0.000` |
+
+Interpretation: the auxiliary arithmetic-process heads are learnable, especially carry
+state, but they are not yet coupled tightly enough to force the final decoded value to be
+correct. The next version should feed predicted carry/borrow states into the value
+decoder, not only train them as auxiliary heads.
+
 ## Training
 
 Smoke train:

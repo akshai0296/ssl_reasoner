@@ -761,6 +761,8 @@ def run_stage(
                         "latent_reasoning_final_acc",
                         "latent_reasoning_digit_value_acc",
                         "latent_reasoning_digit_final_acc",
+                        "latent_reasoning_process_digit_acc",
+                        "latent_reasoning_process_carry_acc",
                     }
                 )
                 print(

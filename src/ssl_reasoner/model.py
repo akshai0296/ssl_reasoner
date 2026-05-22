@@ -17,6 +17,7 @@ RAW_VARIABLE_VALUE_LOSS_WEIGHT = 0.01
 MAX_VARIABLE_REASONING_STEPS = 16
 LATENT_REASONING_TEMPERATURE = 0.07
 TRANSITION_DIGITS = 5
+LATENT_REASONING_CARRY_CLASSES = 100
 TRANSITION_VALUE_MIN = -1000
 TRANSITION_VALUE_MAX = 10000
 TRANSITION_VALUE_CLASSES = TRANSITION_VALUE_MAX - TRANSITION_VALUE_MIN + 1
@@ -1493,6 +1494,18 @@ class LatentReasoningSequence(nn.Module):
             nn.GELU(),
             nn.Linear(d_model * 2, 3 * (2 + TRANSITION_DIGITS * 10)),
         )
+        self.process_digit_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model * 2),
+            nn.GELU(),
+            nn.Linear(d_model * 2, TRANSITION_DIGITS * 10),
+        )
+        self.process_carry_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model * 2),
+            nn.GELU(),
+            nn.Linear(d_model * 2, TRANSITION_DIGITS * LATENT_REASONING_CARRY_CLASSES),
+        )
 
     @staticmethod
     def value_to_sign_digits(values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1514,6 +1527,71 @@ class LatentReasoningSequence(nn.Module):
         )
         magnitude = (digit_ids.long() * multipliers).sum(dim=-1)
         return torch.where(sign_ids.long().eq(1), -magnitude, magnitude)
+
+    @staticmethod
+    def _little_endian_digits(values: torch.Tensor) -> torch.Tensor:
+        rounded = values.round().long().abs().clamp(max=(10 ** TRANSITION_DIGITS) - 1)
+        digits = []
+        for place in range(TRANSITION_DIGITS):
+            digits.append((rounded // (10 ** place)) % 10)
+        return torch.stack(digits, dim=-1)
+
+    @classmethod
+    def process_targets(
+        cls,
+        op_ids: torch.Tensor,
+        values: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        lhs = values[:, :, 0].round().long()
+        rhs = values[:, :, 1].round().long()
+        result = values[:, :, 2].round().long()
+        lhs_digits = cls._little_endian_digits(lhs)
+        rhs_digits = cls._little_endian_digits(rhs)
+        result_digits = cls._little_endian_digits(result)
+        carry_targets = torch.zeros_like(result_digits)
+        process_mask = mask.unsqueeze(-1).expand_as(result_digits).clone()
+        supported = (
+            op_ids.ge(1)
+            & op_ids.le(3)
+            & lhs.ge(0)
+            & rhs.ge(0)
+            & result.ge(0)
+            & result.lt(10 ** TRANSITION_DIGITS)
+        )
+        supported = supported & (
+            op_ids.ne(2) | lhs.ge(rhs)
+        )
+        process_mask = process_mask * supported.unsqueeze(-1).to(process_mask.dtype)
+
+        add_carry = torch.zeros_like(lhs)
+        sub_borrow = torch.zeros_like(lhs)
+        mul_carry = torch.zeros_like(lhs)
+        for place in range(TRANSITION_DIGITS):
+            add_total = lhs_digits[:, :, place] + rhs_digits[:, :, place] + add_carry
+            add_carry = add_total // 10
+
+            sub_diff = lhs_digits[:, :, place] - rhs_digits[:, :, place] - sub_borrow
+            sub_borrow = sub_diff.lt(0).long()
+
+            mul_total = mul_carry
+            for left_place in range(place + 1):
+                right_place = place - left_place
+                mul_total = (
+                    mul_total
+                    + lhs_digits[:, :, left_place] * rhs_digits[:, :, right_place]
+                )
+            mul_carry = mul_total // 10
+
+            place_carry = torch.where(
+                op_ids.eq(1),
+                add_carry,
+                torch.where(op_ids.eq(2), sub_borrow, mul_carry),
+            )
+            carry_targets[:, :, place] = place_carry.clamp(
+                max=LATENT_REASONING_CARRY_CLASSES - 1
+            )
+        return result_digits, carry_targets, process_mask
 
     def _targets(
         self,
@@ -1542,7 +1620,15 @@ class LatentReasoningSequence(nn.Module):
     def _decode(
         self,
         embeddings: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         active_logits = self.active_head(embeddings).squeeze(-1)
         op_logits = self.op_head(embeddings)
         value_logits = self.value_head(embeddings).view(
@@ -1565,7 +1651,27 @@ class LatentReasoningSequence(nn.Module):
             TRANSITION_DIGITS,
             10,
         )
-        return active_logits, op_logits, value_logits, sign_logits, digit_value_logits
+        process_digit_logits = self.process_digit_head(embeddings).view(
+            embeddings.size(0),
+            embeddings.size(1),
+            TRANSITION_DIGITS,
+            10,
+        )
+        process_carry_logits = self.process_carry_head(embeddings).view(
+            embeddings.size(0),
+            embeddings.size(1),
+            TRANSITION_DIGITS,
+            LATENT_REASONING_CARRY_CLASSES,
+        )
+        return (
+            active_logits,
+            op_logits,
+            value_logits,
+            sign_logits,
+            digit_value_logits,
+            process_digit_logits,
+            process_carry_logits,
+        )
 
     def loss(
         self,
@@ -1612,9 +1718,15 @@ class LatentReasoningSequence(nn.Module):
             torch.zeros(flat_pred.size(0), device=flat_pred.device, dtype=torch.long),
         )
 
-        active_logits, op_logits, value_logits, sign_logits, digit_value_logits = self._decode(
-            pred
-        )
+        (
+            active_logits,
+            op_logits,
+            value_logits,
+            sign_logits,
+            digit_value_logits,
+            process_digit_logits,
+            process_carry_logits,
+        ) = self._decode(pred)
         active_loss = F.binary_cross_entropy_with_logits(active_logits, all_mask)
         value_targets = ReasoningStepTargetEncoder.value_to_class(all_values)
         sign_targets, digit_targets = self.value_to_sign_digits(all_values.reshape(-1))
@@ -1657,6 +1769,27 @@ class LatentReasoningSequence(nn.Module):
         )
         digit_loss = digit_loss.mean(dim=-1)
         digit_loss = (digit_loss * value_field_mask).sum() / value_field_mask.sum().clamp(min=1.0)
+        process_digit_targets, process_carry_targets, process_mask = self.process_targets(
+            all_ops,
+            all_values,
+            all_mask,
+        )
+        process_digit_loss = F.cross_entropy(
+            process_digit_logits.reshape(-1, 10),
+            process_digit_targets.reshape(-1),
+            reduction="none",
+        ).view_as(process_mask)
+        process_digit_loss = (
+            process_digit_loss * process_mask
+        ).sum() / process_mask.sum().clamp(min=1.0)
+        process_carry_loss = F.cross_entropy(
+            process_carry_logits.reshape(-1, LATENT_REASONING_CARRY_CLASSES),
+            process_carry_targets.reshape(-1),
+            reduction="none",
+        ).view_as(process_mask)
+        process_carry_loss = (
+            process_carry_loss * process_mask
+        ).sum() / process_mask.sum().clamp(min=1.0)
 
         op_acc = (
             (op_logits.argmax(dim=-1) == all_ops).float() * all_mask
@@ -1678,6 +1811,14 @@ class LatentReasoningSequence(nn.Module):
         digit_final_acc = (
             digit_values[:, -1, 2] == all_values[:, -1, 2].round().long()
         ).float().mean()
+        process_digit_acc = (
+            (process_digit_logits.argmax(dim=-1) == process_digit_targets).float()
+            * process_mask
+        ).sum() / process_mask.sum().clamp(min=1.0)
+        process_carry_acc = (
+            (process_carry_logits.argmax(dim=-1) == process_carry_targets).float()
+            * process_mask
+        ).sum() / process_mask.sum().clamp(min=1.0)
         loss = (
             latent_loss
             + 0.2 * contrastive_loss
@@ -1687,6 +1828,8 @@ class LatentReasoningSequence(nn.Module):
             + value_loss
             + sign_loss
             + digit_loss
+            + process_digit_loss
+            + process_carry_loss
         )
         return {
             "loss": loss,
@@ -1698,6 +1841,8 @@ class LatentReasoningSequence(nn.Module):
             "latent_reasoning_value_loss": value_loss,
             "latent_reasoning_digit_sign_loss": sign_loss,
             "latent_reasoning_digit_value_loss": digit_loss,
+            "latent_reasoning_process_digit_loss": process_digit_loss,
+            "latent_reasoning_process_carry_loss": process_carry_loss,
             "latent_reasoning_cosine": cosine_acc,
             "latent_reasoning_active_acc": active_acc,
             "latent_reasoning_op_acc": op_acc,
@@ -1705,6 +1850,8 @@ class LatentReasoningSequence(nn.Module):
             "latent_reasoning_final_acc": final_acc,
             "latent_reasoning_digit_value_acc": digit_value_acc,
             "latent_reasoning_digit_final_acc": digit_final_acc,
+            "latent_reasoning_process_digit_acc": process_digit_acc,
+            "latent_reasoning_process_carry_acc": process_carry_acc,
         }
 
     @torch.no_grad()
@@ -1714,9 +1861,15 @@ class LatentReasoningSequence(nn.Module):
         value_mode: str = "class",
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         pred = self.predictor(math_ids)
-        active_logits, op_logits, value_logits, sign_logits, digit_value_logits = self._decode(
-            pred
-        )
+        (
+            active_logits,
+            op_logits,
+            value_logits,
+            sign_logits,
+            digit_value_logits,
+            _process_digit_logits,
+            _process_carry_logits,
+        ) = self._decode(pred)
         if value_mode == "class":
             values = ReasoningStepTargetEncoder.class_to_value(value_logits.argmax(dim=-1))
         elif value_mode == "digit":
