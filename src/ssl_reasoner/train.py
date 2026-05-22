@@ -759,6 +759,8 @@ def run_stage(
                         "latent_reasoning_op_acc",
                         "latent_reasoning_value_acc",
                         "latent_reasoning_final_acc",
+                        "latent_reasoning_digit_value_acc",
+                        "latent_reasoning_digit_final_acc",
                     }
                 )
                 print(
@@ -834,7 +836,12 @@ def run_stage(
                     if name == "reasoning_sequence"
                     else standalone_transition_acc
                     if name == "standalone_transition"
-                    else float(out.get("latent_reasoning_final_acc", torch.tensor(0.0)).item())
+                    else float(
+                        torch.maximum(
+                            out.get("latent_reasoning_final_acc", torch.tensor(0.0)),
+                            out.get("latent_reasoning_digit_final_acc", torch.tensor(0.0)),
+                        ).item()
+                    )
                     if name == "latent_reasoning_sequence"
                     else variable_unconstrained_trace_acc
                     + 0.001 * float(out.get("variable_class_value_acc", torch.tensor(0.0)).item())

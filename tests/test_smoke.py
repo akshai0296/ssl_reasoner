@@ -716,6 +716,8 @@ def test_latent_reasoning_sequence_loss_and_decode():
     assert out["latent_reasoning_cosine"].ndim == 0
     assert out["latent_reasoning_active_acc"].ndim == 0
     assert out["latent_reasoning_final_acc"].ndim == 0
+    assert out["latent_reasoning_digit_value_acc"].ndim == 0
+    assert out["latent_reasoning_digit_final_acc"].ndim == 0
     assert pred_active.shape == (4, 17)
     assert pred_ops.shape == (4, 17)
     assert pred_values.shape == (4, 17, 3)

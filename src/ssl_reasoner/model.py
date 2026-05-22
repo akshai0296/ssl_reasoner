@@ -1487,6 +1487,33 @@ class LatentReasoningSequence(nn.Module):
             nn.GELU(),
             nn.Linear(d_model * 2, 3 * TRANSITION_VALUE_CLASSES),
         )
+        self.digit_value_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model * 2),
+            nn.GELU(),
+            nn.Linear(d_model * 2, 3 * (2 + TRANSITION_DIGITS * 10)),
+        )
+
+    @staticmethod
+    def value_to_sign_digits(values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        rounded = values.round().long()
+        sign = rounded.lt(0).long()
+        magnitude = rounded.abs().clamp(max=(10 ** TRANSITION_DIGITS) - 1)
+        digits = []
+        for place in reversed(range(TRANSITION_DIGITS)):
+            divisor = 10 ** place
+            digits.append((magnitude // divisor) % 10)
+        return sign, torch.stack(digits, dim=-1)
+
+    @staticmethod
+    def sign_digits_to_value(sign_ids: torch.Tensor, digit_ids: torch.Tensor) -> torch.Tensor:
+        multipliers = torch.tensor(
+            [10 ** place for place in reversed(range(TRANSITION_DIGITS))],
+            device=digit_ids.device,
+            dtype=torch.long,
+        )
+        magnitude = (digit_ids.long() * multipliers).sum(dim=-1)
+        return torch.where(sign_ids.long().eq(1), -magnitude, magnitude)
 
     def _targets(
         self,
@@ -1515,7 +1542,7 @@ class LatentReasoningSequence(nn.Module):
     def _decode(
         self,
         embeddings: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         active_logits = self.active_head(embeddings).squeeze(-1)
         op_logits = self.op_head(embeddings)
         value_logits = self.value_head(embeddings).view(
@@ -1524,7 +1551,21 @@ class LatentReasoningSequence(nn.Module):
             3,
             TRANSITION_VALUE_CLASSES,
         )
-        return active_logits, op_logits, value_logits
+        digit_logits = self.digit_value_head(embeddings).view(
+            embeddings.size(0),
+            embeddings.size(1),
+            3,
+            2 + TRANSITION_DIGITS * 10,
+        )
+        sign_logits = digit_logits[:, :, :, :2]
+        digit_value_logits = digit_logits[:, :, :, 2:].view(
+            embeddings.size(0),
+            embeddings.size(1),
+            3,
+            TRANSITION_DIGITS,
+            10,
+        )
+        return active_logits, op_logits, value_logits, sign_logits, digit_value_logits
 
     def loss(
         self,
@@ -1571,9 +1612,19 @@ class LatentReasoningSequence(nn.Module):
             torch.zeros(flat_pred.size(0), device=flat_pred.device, dtype=torch.long),
         )
 
-        active_logits, op_logits, value_logits = self._decode(pred)
+        active_logits, op_logits, value_logits, sign_logits, digit_value_logits = self._decode(
+            pred
+        )
         active_loss = F.binary_cross_entropy_with_logits(active_logits, all_mask)
         value_targets = ReasoningStepTargetEncoder.value_to_class(all_values)
+        sign_targets, digit_targets = self.value_to_sign_digits(all_values.reshape(-1))
+        sign_targets = sign_targets.view(all_values.size(0), all_values.size(1), 3)
+        digit_targets = digit_targets.view(
+            all_values.size(0),
+            all_values.size(1),
+            3,
+            TRANSITION_DIGITS,
+        )
         op_loss = F.cross_entropy(
             op_logits.reshape(-1, 4),
             all_ops.reshape(-1),
@@ -1588,6 +1639,24 @@ class LatentReasoningSequence(nn.Module):
         value_field_mask = all_mask.unsqueeze(-1).expand_as(value_loss).clone()
         value_field_mask[:, -1, :2] = 0.0
         value_loss = (value_loss * value_field_mask).sum() / value_field_mask.sum().clamp(min=1.0)
+        sign_loss = F.cross_entropy(
+            sign_logits.reshape(-1, 2),
+            sign_targets.reshape(-1),
+            reduction="none",
+        ).view_as(value_field_mask)
+        sign_loss = (sign_loss * value_field_mask).sum() / value_field_mask.sum().clamp(min=1.0)
+        digit_loss = F.cross_entropy(
+            digit_value_logits.reshape(-1, 10),
+            digit_targets.reshape(-1),
+            reduction="none",
+        ).view(
+            all_mask.size(0),
+            all_mask.size(1),
+            3,
+            TRANSITION_DIGITS,
+        )
+        digit_loss = digit_loss.mean(dim=-1)
+        digit_loss = (digit_loss * value_field_mask).sum() / value_field_mask.sum().clamp(min=1.0)
 
         op_acc = (
             (op_logits.argmax(dim=-1) == all_ops).float() * all_mask
@@ -1599,6 +1668,16 @@ class LatentReasoningSequence(nn.Module):
         final_acc = (
             value_logits[:, -1, 2].argmax(dim=-1) == value_targets[:, -1, 2]
         ).float().mean()
+        digit_values = self.sign_digits_to_value(
+            sign_logits.argmax(dim=-1),
+            digit_value_logits.argmax(dim=-1),
+        )
+        digit_value_acc = (
+            (digit_values == all_values.round().long()).float() * value_field_mask
+        ).sum() / value_field_mask.sum().clamp(min=1.0)
+        digit_final_acc = (
+            digit_values[:, -1, 2] == all_values[:, -1, 2].round().long()
+        ).float().mean()
         loss = (
             latent_loss
             + 0.2 * contrastive_loss
@@ -1606,6 +1685,8 @@ class LatentReasoningSequence(nn.Module):
             + active_loss
             + op_loss
             + value_loss
+            + sign_loss
+            + digit_loss
         )
         return {
             "loss": loss,
@@ -1615,21 +1696,36 @@ class LatentReasoningSequence(nn.Module):
             "latent_reasoning_active_loss": active_loss,
             "latent_reasoning_op_loss": op_loss,
             "latent_reasoning_value_loss": value_loss,
+            "latent_reasoning_digit_sign_loss": sign_loss,
+            "latent_reasoning_digit_value_loss": digit_loss,
             "latent_reasoning_cosine": cosine_acc,
             "latent_reasoning_active_acc": active_acc,
             "latent_reasoning_op_acc": op_acc,
             "latent_reasoning_value_acc": value_acc,
             "latent_reasoning_final_acc": final_acc,
+            "latent_reasoning_digit_value_acc": digit_value_acc,
+            "latent_reasoning_digit_final_acc": digit_final_acc,
         }
 
     @torch.no_grad()
     def predict_structured(
         self,
         math_ids: torch.Tensor,
+        value_mode: str = "class",
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         pred = self.predictor(math_ids)
-        active_logits, op_logits, value_logits = self._decode(pred)
-        values = ReasoningStepTargetEncoder.class_to_value(value_logits.argmax(dim=-1))
+        active_logits, op_logits, value_logits, sign_logits, digit_value_logits = self._decode(
+            pred
+        )
+        if value_mode == "class":
+            values = ReasoningStepTargetEncoder.class_to_value(value_logits.argmax(dim=-1))
+        elif value_mode == "digit":
+            values = self.sign_digits_to_value(
+                sign_logits.argmax(dim=-1),
+                digit_value_logits.argmax(dim=-1),
+            )
+        else:
+            raise ValueError(f"Unknown latent reasoning value_mode: {value_mode}")
         return active_logits.sigmoid().ge(0.5), op_logits.argmax(dim=-1), values
 
 
@@ -2990,9 +3086,13 @@ class MathJEPAReadout(nn.Module):
         standalone_decomposed_values: bool = False,
         standalone_hybrid_values: bool = False,
         latent_reasoning_values: bool = False,
+        latent_reasoning_digit_values: bool = False,
     ) -> list[str]:
-        if latent_reasoning_values:
-            active, op_ids, values = self.latent_reasoning_sequence.predict_structured(math_ids)
+        if latent_reasoning_values or latent_reasoning_digit_values:
+            active, op_ids, values = self.latent_reasoning_sequence.predict_structured(
+                math_ids,
+                value_mode="digit" if latent_reasoning_digit_values else "class",
+            )
             active_rows = active.detach().cpu().tolist()
             op_rows = op_ids.detach().cpu().tolist()
             value_rows = values.detach().cpu().tolist()

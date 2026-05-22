@@ -213,6 +213,7 @@ def evaluate_preset(
         or args.standalone_decomposed_values
         or args.standalone_hybrid_values
         or args.latent_reasoning_values
+        or args.latent_reasoning_digit_values
     ):
         max_math_len = train_args.get("max_math_len", 8)
         all_math_ids = torch.tensor(
@@ -237,6 +238,7 @@ def evaluate_preset(
                     standalone_decomposed_values=args.standalone_decomposed_values,
                     standalone_hybrid_values=args.standalone_hybrid_values,
                     latent_reasoning_values=args.latent_reasoning_values,
+                    latent_reasoning_digit_values=args.latent_reasoning_digit_values,
                 )
             )
 
@@ -324,6 +326,7 @@ def evaluate_problem(
         standalone_decomposed_values=args.standalone_decomposed_values,
         standalone_hybrid_values=args.standalone_hybrid_values,
         latent_reasoning_values=args.latent_reasoning_values,
+        latent_reasoning_digit_values=args.latent_reasoning_digit_values,
     )
     pred_trace = traces[0]
     final = trace_final_value(pred_trace)
@@ -372,6 +375,7 @@ def main() -> None:
     parser.add_argument("--standalone-decomposed-values", action="store_true")
     parser.add_argument("--standalone-hybrid-values", action="store_true")
     parser.add_argument("--latent-reasoning-values", action="store_true")
+    parser.add_argument("--latent-reasoning-digit-values", action="store_true")
     parser.add_argument("--unconstrained", action="store_true")
     args = parser.parse_args()
 

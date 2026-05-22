@@ -79,8 +79,8 @@ final result, final position        -> z_target_final
 ```
 
 Training uses latent matching, in-batch contrastive loss, hard negatives, active/stop
-prediction, operation decoding, and value decoding. This is now implemented as a
-trainable baseline, but it is not yet the strongest solver.
+prediction, operation decoding, bounded value-class decoding, and a digit value decoder.
+This is now implemented as a trainable baseline, but it is not yet the strongest solver.
 
 ### Experimental Standalone Transition
 
@@ -227,6 +227,11 @@ PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
   --checkpoint checkpoints/latent_reasoning_sequence/best.pt \
   --latent-reasoning-values \
   --preset in_dist
+
+PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
+  --checkpoint checkpoints/latent_reasoning_sequence_digit/best.pt \
+  --latent-reasoning-digit-values \
+  --preset in_dist
 ```
 
 ## Current Results
@@ -310,8 +315,29 @@ Public trace eval for `checkpoints/latent_reasoning_sequence/best.pt` is still l
 | `length_16` | `0.000` | `0.000` |
 
 Interpretation: the model learns active/stop and operation structure in latent space, but
-the bounded whole-value decoder is not accurate enough. The next architectural step is a
-digit/carry-aware decoder for latent reasoning states.
+the bounded whole-value decoder is not accurate enough.
+
+The first digit-decoder experiment adds sign plus fixed decimal digits to each latent
+reasoning state. Initializing from `checkpoints/latent_reasoning_sequence/best.pt` and
+training for 2000 more steps gives:
+
+| Metric | Step 1 | Step 2000 |
+| --- | ---: | ---: |
+| class value accuracy | `0.318` | `0.379` |
+| class final accuracy | `0.141` | `0.156` |
+| digit value accuracy | `0.000` | `0.228` |
+| digit final accuracy | `0.000` | `0.016` |
+
+Public in-dist eval on `checkpoints/latent_reasoning_sequence_digit/best.pt`:
+
+| Decode mode | Answer exact | Trace exact |
+| --- | ---: | ---: |
+| class | `0.035` | `0.005` |
+| digit | `0.025` | `0.000` |
+
+Interpretation: direct digit decoding learns some value fields, but it is not better than
+the class decoder yet. The next architectural step is explicit carry/borrow supervision
+for addition/subtraction and partial-product supervision for multiplication.
 
 ## Training
 
