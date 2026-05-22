@@ -1541,7 +1541,7 @@ class LatentReasoningSequence(nn.Module):
             nn.LayerNorm(d_model),
             nn.Linear(d_model, d_model),
             nn.GELU(),
-            nn.Linear(d_model, max_steps + 1),
+            nn.Linear(d_model, (max_steps + 1) * (2 + TRANSITION_DIGITS * 10)),
         )
         self.state_value_active_head = nn.Sequential(
             nn.LayerNorm(d_model),
@@ -1902,7 +1902,20 @@ class LatentReasoningSequence(nn.Module):
             process_carry_logits,
             process_value_logits,
         ) = self._decode(pred)
-        state_value_pred = self.state_value_head(pred)
+        state_value_logits = self.state_value_head(pred).view(
+            pred.size(0),
+            pred.size(1),
+            self.max_steps + 1,
+            2 + TRANSITION_DIGITS * 10,
+        )
+        state_value_sign_logits = state_value_logits[:, :, :, :2]
+        state_value_digit_logits = state_value_logits[:, :, :, 2:].view(
+            pred.size(0),
+            pred.size(1),
+            self.max_steps + 1,
+            TRANSITION_DIGITS,
+            10,
+        )
         state_value_active_logits = self.state_value_active_head(pred)
         state_op_logits = self.state_op_head(pred).view(
             pred.size(0),
@@ -1922,14 +1935,39 @@ class LatentReasoningSequence(nn.Module):
         )
         state_value_mask = state_value_mask * all_mask.unsqueeze(-1)
         state_op_mask = state_op_mask * all_mask.unsqueeze(-1)
-        state_value_loss = F.smooth_l1_loss(
-            state_value_pred,
-            state_values / TRACE_STATE_SCALE,
-            reduction="none",
+        state_sign_targets, state_digit_targets = self.value_to_sign_digits(
+            state_values.reshape(-1)
         )
-        state_value_loss = (
-            state_value_loss * state_value_mask
+        state_sign_targets = state_sign_targets.view_as(state_values).long()
+        state_digit_targets = state_digit_targets.view(
+            state_values.size(0),
+            state_values.size(1),
+            state_values.size(2),
+            TRANSITION_DIGITS,
+        )
+        state_value_sign_loss = F.cross_entropy(
+            state_value_sign_logits.reshape(-1, 2),
+            state_sign_targets.reshape(-1),
+            reduction="none",
+        ).view_as(state_value_mask)
+        state_value_sign_loss = (
+            state_value_sign_loss * state_value_mask
         ).sum() / state_value_mask.sum().clamp(min=1.0)
+        state_value_digit_loss = F.cross_entropy(
+            state_value_digit_logits.reshape(-1, 10),
+            state_digit_targets.reshape(-1),
+            reduction="none",
+        ).view(
+            state_values.size(0),
+            state_values.size(1),
+            state_values.size(2),
+            TRANSITION_DIGITS,
+        )
+        state_value_digit_loss = state_value_digit_loss.mean(dim=-1)
+        state_value_digit_loss = (
+            state_value_digit_loss * state_value_mask
+        ).sum() / state_value_mask.sum().clamp(min=1.0)
+        state_value_loss = state_value_sign_loss + state_value_digit_loss
         state_value_active_loss = F.binary_cross_entropy_with_logits(
             state_value_active_logits,
             state_value_mask,
@@ -2050,7 +2088,10 @@ class LatentReasoningSequence(nn.Module):
             (process_carry_logits.argmax(dim=-1) == process_carry_targets).float()
             * process_mask
         ).sum() / process_mask.sum().clamp(min=1.0)
-        rounded_state_values = (state_value_pred * TRACE_STATE_SCALE).round()
+        rounded_state_values = self.sign_digits_to_value(
+            state_value_sign_logits.argmax(dim=-1),
+            state_value_digit_logits.argmax(dim=-1),
+        )
         state_value_acc = (
             (rounded_state_values == state_values).float() * state_value_mask
         ).sum() / state_value_mask.sum().clamp(min=1.0)
@@ -2086,6 +2127,8 @@ class LatentReasoningSequence(nn.Module):
             "latent_reasoning_contrastive_loss": contrastive_loss,
             "latent_reasoning_hard_negative_loss": hard_loss,
             "latent_reasoning_state_value_loss": state_value_loss,
+            "latent_reasoning_state_value_sign_loss": state_value_sign_loss,
+            "latent_reasoning_state_value_digit_loss": state_value_digit_loss,
             "latent_reasoning_state_value_active_loss": state_value_active_loss,
             "latent_reasoning_state_op_loss": state_op_loss,
             "latent_reasoning_state_op_active_loss": state_op_active_loss,

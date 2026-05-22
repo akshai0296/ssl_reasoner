@@ -518,6 +518,42 @@ state-value reconstruction is still poor because it uses direct regression over 
 integer states. The next refinement should decode state values with class or digit
 heads, or use the predicted state directly to constrain the next step selection.
 
+The discrete state-value decoder replaces direct state-value regression with sign and
+fixed-digit classification for each remaining expression value slot. This keeps the
+state objective exact without creating a huge class tensor over every state slot.
+Starting from `checkpoints/latent_reasoning_sequence_state_scaled_smoke/best.pt` with
+partial loading and training for 1000 steps gives:
+
+| Metric | Step 1 | Step 1000 |
+| --- | ---: | ---: |
+| class value accuracy | `0.472` | `0.480` |
+| class final accuracy | `0.344` | `0.375` |
+| process-conditioned value accuracy | `0.443` | `0.476` |
+| process-conditioned final accuracy | `0.328` | `0.359` |
+| state value exact accuracy | `0.000` | `0.061` |
+| state value active accuracy | `0.991` | `0.996` |
+| state op accuracy | `0.526` | `0.563` |
+| state op active accuracy | `0.990` | `0.996` |
+
+Public 200-sample eval for
+`checkpoints/latent_reasoning_sequence_state_digit_smoke/best.pt`:
+
+| Preset | Class answer | Class trace | Process answer | Process trace |
+| --- | ---: | ---: | ---: | ---: |
+| `in_dist` | `0.055` | `0.010` | `0.050` | `0.015` |
+| `larger_numbers` | `0.000` | `0.000` | `0.000` | `0.000` |
+| `longer_expr` | `0.035` | `0.000` | `0.025` | `0.000` |
+| `no_multiply` | `0.090` | `0.000` | `0.110` | `0.000` |
+| `many_multiply` | `0.125` | `0.085` | `0.110` | `0.070` |
+| `length_8` | `0.000` | `0.000` | `0.000` | `0.000` |
+| `length_16` | `0.000` | `0.000` | `0.000` | `0.000` |
+
+Interpretation: discrete state decoding improves exact state-value reconstruction from
+about `0.010` to `0.061` and gives the best class-mode public results so far. It lowers
+the internal final-value metric compared with the regression checkpoint, so the next
+step is to use predicted expression state as a constraint or feature for the next-step
+decoder instead of treating it as only an auxiliary loss.
+
 ## Training
 
 Smoke train:
