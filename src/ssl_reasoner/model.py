@@ -1362,11 +1362,13 @@ class ReasoningStepTargetEncoder(nn.Module):
         op_ids: torch.Tensor,
         values: torch.Tensor,
         kind_ids: torch.Tensor,
+        position_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch, states = op_ids.shape
-        position_ids = torch.arange(states, device=op_ids.device).unsqueeze(0).expand(
-            batch, -1
-        )
+        if position_ids is None:
+            position_ids = torch.arange(states, device=op_ids.device).unsqueeze(0).expand(
+                batch, -1
+            )
         lhs = values[:, :, 0]
         rhs = values[:, :, 1]
         result = values[:, :, 2]
@@ -1741,20 +1743,48 @@ class LatentReasoningSequence(nn.Module):
         labels = torch.arange(flat_pred.size(0), device=flat_pred.device)
         contrastive_loss = F.cross_entropy(logits, labels)
 
-        hard_values = all_values.reshape(-1, 3)[flat_mask].unsqueeze(1).repeat(1, 3, 1)
-        hard_ops = all_ops.reshape(-1)[flat_mask].unsqueeze(1).repeat(1, 3)
-        hard_values[:, 0, 2] = hard_values[:, 0, 2] + 1.0
-        hard_values[:, 1, 2] = hard_values[:, 1, 2] - 1.0
-        hard_ops[:, 2] = torch.where(
-            hard_ops[:, 2].eq(3),
-            torch.ones_like(hard_ops[:, 2]),
-            hard_ops[:, 2] + 1,
+        hard_count = 8
+        hard_values = all_values.unsqueeze(2).expand(-1, -1, hard_count, -1).clone()
+        hard_ops = all_ops.unsqueeze(2).expand(-1, -1, hard_count).clone()
+
+        hard_values[:, :, 0, 2] = hard_values[:, :, 0, 2] + 1.0
+        hard_values[:, :, 1, 2] = hard_values[:, :, 1, 2] - 1.0
+        hard_ops[:, :, 2] = torch.where(
+            hard_ops[:, :, 2].eq(3),
+            torch.ones_like(hard_ops[:, :, 2]),
+            hard_ops[:, :, 2] + 1,
         )
-        hard_kind = kind_ids.reshape(-1)[flat_mask].unsqueeze(1).expand(-1, 3)
+        hard_values[:, :, 3, 0] = all_values[:, :, 1]
+        hard_values[:, :, 3, 1] = all_values[:, :, 0]
+
+        prev_values = torch.roll(all_values, shifts=1, dims=1)
+        next_values = torch.roll(all_values, shifts=-1, dims=1)
+        prev_values[:, 0] = all_values[:, 0]
+        next_values[:, -1] = all_values[:, -1]
+        hard_values[:, :, 4, 0] = prev_values[:, :, 2]
+        hard_values[:, :, 5, 1] = next_values[:, :, 2]
+        hard_values[:, :, 6] = prev_values
+        hard_values[:, :, 7] = next_values
+
+        flat_hard_values = hard_values.reshape(-1, hard_count, 3)[flat_mask]
+        flat_hard_ops = hard_ops.reshape(-1, hard_count)[flat_mask]
+        hard_kind = kind_ids.reshape(-1)[flat_mask].unsqueeze(1).expand(
+            -1,
+            hard_count,
+        )
+        position_ids = torch.arange(
+            all_ops.size(1),
+            device=all_ops.device,
+        ).unsqueeze(0).expand_as(all_ops)
+        hard_positions = position_ids.reshape(-1)[flat_mask].unsqueeze(1).expand(
+            -1,
+            hard_count,
+        )
         hard_target = self.target_encoder(
-            hard_ops,
-            hard_values,
+            flat_hard_ops,
+            flat_hard_values,
             hard_kind,
+            position_ids=hard_positions,
         ).detach()
         hard_scores = (flat_pred.unsqueeze(1) * hard_target).sum(dim=-1)
         pos_scores = (flat_pred * flat_target).sum(dim=-1, keepdim=True)
@@ -1883,7 +1913,7 @@ class LatentReasoningSequence(nn.Module):
         loss = (
             latent_loss
             + 0.2 * contrastive_loss
-            + 0.2 * hard_loss
+            + 0.5 * hard_loss
             + active_loss
             + op_loss
             + value_loss

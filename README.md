@@ -442,6 +442,45 @@ solve exact traces because the contrastive task is not yet hard enough: swapped 
 wrong intermediate substitutions, and near-miss results are still too close in latent
 space.
 
+The step-local hard-negative update expands each latent step's contrastive negatives
+from simple result/operator perturbations to near-miss reasoning states:
+
+- result `+1` and `-1`
+- wrong operator
+- swapped `lhs`/`rhs`
+- previous-step result substituted as `lhs`
+- next-step result substituted as `rhs`
+- previous/future step target at the same position
+
+These negatives are encoded at the original reasoning-step position and the
+hard-negative loss weight is increased from `0.2` to `0.5`. Starting from the recurrent
+checkpoint and training for 1000 steps gives:
+
+| Metric | Step 1 | Step 1000 |
+| --- | ---: | ---: |
+| class value accuracy | `0.403` | `0.467` |
+| class final accuracy | `0.188` | `0.281` |
+| process-conditioned value accuracy | `0.373` | `0.433` |
+| process-conditioned final accuracy | `0.172` | `0.266` |
+| operation accuracy | `0.935` | `0.941` |
+
+Public 200-sample eval for `checkpoints/latent_reasoning_sequence_hardneg_smoke/best.pt`:
+
+| Preset | Class answer | Class trace | Process answer | Process trace |
+| --- | ---: | ---: | ---: | ---: |
+| `in_dist` | `0.040` | `0.015` | `0.030` | `0.005` |
+| `larger_numbers` | `0.000` | `0.000` | `0.000` | `0.000` |
+| `longer_expr` | `0.015` | `0.000` | `0.015` | `0.005` |
+| `no_multiply` | `0.090` | `0.000` | `0.105` | `0.000` |
+| `many_multiply` | `0.115` | `0.075` | `0.115` | `0.060` |
+| `length_8` | `0.000` | `0.000` | `0.000` | `0.000` |
+| `length_16` | `0.000` | `0.000` | `0.000` | `0.000` |
+
+Interpretation: hard negatives improve both internal final-value accuracy and public
+answer accuracy on several splits. The model is still not exact because it needs a
+state-transition objective that explicitly predicts the next expression state after each
+reduction, not only isolated step tuples.
+
 ## Training
 
 Smoke train:
