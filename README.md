@@ -287,19 +287,31 @@ Interpretation:
 
 ### Latent Reasoning Sequence
 
-A 100-step smoke run confirms the stage trains and saves:
+A 5000-step run confirms that the latent sequence architecture trains, but exact value
+decoding remains weak:
 
-| Metric | Step 1 | Step 100 |
+| Metric | Step 1 | Step 5000 |
 | --- | ---: | ---: |
-| active accuracy | `0.642` | `0.962` |
-| operation accuracy | `0.221` | `0.754` |
-| value accuracy | `0.000` | `0.051` |
-| final accuracy | `0.000` | `0.078` |
+| active accuracy | `0.606` | `1.000` |
+| operation accuracy | `0.284` | `0.929` |
+| value accuracy | `0.000` | `0.310` |
+| final accuracy | `0.000` | `0.188` |
 
-The 50-sample trace eval after this short smoke run is still `0.000`; this is expected
-for such a small run. The important change is architectural: the repo now has a real
-latent step sequence with target embeddings, predicted embeddings, contrastive negatives,
-and structured decoding.
+Public trace eval for `checkpoints/latent_reasoning_sequence/best.pt` is still low:
+
+| Preset | Answer exact | Trace exact |
+| --- | ---: | ---: |
+| `in_dist` | `0.035` | `0.005` |
+| `larger_numbers` | `0.000` | `0.000` |
+| `longer_expr` | `0.005` | `0.000` |
+| `no_multiply` | `0.020` | `0.000` |
+| `many_multiply` | `0.060` | `0.030` |
+| `length_8` | `0.005` | `0.000` |
+| `length_16` | `0.000` | `0.000` |
+
+Interpretation: the model learns active/stop and operation structure in latent space, but
+the bounded whole-value decoder is not accurate enough. The next architectural step is a
+digit/carry-aware decoder for latent reasoning states.
 
 ## Training
 
