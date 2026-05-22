@@ -410,6 +410,38 @@ multi-step traces. The next useful direction is to make the latent reasoner recu
 consume its previous predicted state and train step-local negatives that swap operands,
 operators, and intermediate results.
 
+The recurrent latent predictor makes each predicted reasoning-state embedding feed into
+the next step prediction. This gives the latent sequence an explicit step-to-step state
+path instead of predicting all reasoning states independently from parallel query slots.
+Starting from the process-conditioned checkpoint with partial loading and training for
+1000 steps gives:
+
+| Metric | Step 1 | Step 1000 |
+| --- | ---: | ---: |
+| class value accuracy | `0.026` | `0.424` |
+| class final accuracy | `0.016` | `0.203` |
+| process-conditioned value accuracy | `0.029` | `0.382` |
+| process-conditioned final accuracy | `0.031` | `0.172` |
+| operation accuracy | `0.281` | `0.934` |
+
+Public 200-sample eval for `checkpoints/latent_reasoning_sequence_recurrent_smoke/best.pt`:
+
+| Preset | Class answer | Class trace | Process answer | Process trace |
+| --- | ---: | ---: | ---: | ---: |
+| `in_dist` | `0.030` | `0.005` | `0.040` | `0.005` |
+| `larger_numbers` | `0.000` | `0.000` | `0.000` | `0.000` |
+| `longer_expr` | `0.015` | `0.000` | `0.010` | `0.000` |
+| `no_multiply` | `0.040` | `0.000` | `0.025` | `0.000` |
+| `many_multiply` | `0.085` | `0.060` | `0.090` | `0.040` |
+| `length_8` | `0.005` | `0.000` | `0.000` | `0.000` |
+| `length_16` | `0.000` | `0.000` | `0.000` | `0.000` |
+
+Interpretation: recurrence helps the latent value fields recover and gives a small
+public answer improvement, especially in the process-conditioned path. It still does not
+solve exact traces because the contrastive task is not yet hard enough: swapped operands,
+wrong intermediate substitutions, and near-miss results are still too close in latent
+space.
+
 ## Training
 
 Smoke train:

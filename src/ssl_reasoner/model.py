@@ -1409,6 +1409,7 @@ class LatentReasoningSequencePredictor(nn.Module):
         self.math_pos_embed = nn.Parameter(torch.randn(1, max_math_len, d_model) * 0.02)
         self.query_embed = nn.Parameter(torch.randn(1, max_steps + 1, d_model) * 0.02)
         self.kind_embed = nn.Embedding(2, d_model)
+        self.start_state = nn.Parameter(torch.randn(1, d_model) * 0.02)
         layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=num_heads,
@@ -1418,9 +1419,15 @@ class LatentReasoningSequencePredictor(nn.Module):
             activation="gelu",
         )
         self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers)
+        self.recurrent_in = nn.Sequential(
+            nn.LayerNorm(d_model * 2),
+            nn.Linear(d_model * 2, d_model),
+            nn.GELU(),
+        )
+        self.step_cell = nn.GRUCell(d_model, d_model)
         self.out = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, d_model),
+            nn.LayerNorm(d_model * 3),
+            nn.Linear(d_model * 3, d_model),
             nn.GELU(),
             nn.Linear(d_model, d_model),
             nn.LayerNorm(d_model),
@@ -1447,8 +1454,21 @@ class LatentReasoningSequencePredictor(nn.Module):
         )
         mask = torch.cat([math_mask, query_mask], dim=1)
         encoded = self.encoder(tokens, src_key_padding_mask=~mask)
-        reasoning = encoded[:, -self.max_steps - 1 :]
-        return F.normalize(self.out(reasoning), dim=-1)
+        query_context = encoded[:, -self.max_steps - 1 :]
+        prev = F.normalize(self.start_state.expand(batch, -1), dim=-1)
+        hidden = query_context.new_zeros(batch, query_context.size(-1))
+        reasoning = []
+        for step in range(self.max_steps + 1):
+            step_context = query_context[:, step]
+            cell_input = self.recurrent_in(torch.cat([step_context, prev], dim=-1))
+            hidden = self.step_cell(cell_input, hidden)
+            current = F.normalize(
+                self.out(torch.cat([step_context, hidden, prev], dim=-1)),
+                dim=-1,
+            )
+            reasoning.append(current)
+            prev = current
+        return torch.stack(reasoning, dim=1)
 
 
 class LatentReasoningSequence(nn.Module):
