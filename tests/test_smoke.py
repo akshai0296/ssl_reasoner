@@ -686,6 +686,42 @@ def test_variable_reasoner_has_raw_value_head():
     assert standalone["standalone_transition_acc"].ndim == 0
 
 
+def test_latent_reasoning_sequence_loss_and_decode():
+    tokenizer = build_math_tokenizer()
+    dataset = MathDataset(
+        generate_math_examples(4, seed=7, curriculum="multi_step_balanced"),
+        tokenizer,
+        max_math_len=34,
+        max_variable_steps=16,
+    )
+    batch = [dataset[i] for i in range(4)]
+    math_ids = torch.stack([item["math_ids"] for item in batch])
+    op_ids = torch.stack([item["variable_trace_op_ids"] for item in batch])
+    values = torch.stack([item["variable_trace_values"] for item in batch])
+    step_mask = torch.stack([item["variable_trace_mask"] for item in batch])
+
+    model = MathJEPAReadout(
+        vocab_size=tokenizer.vocab_size,
+        max_math_len=34,
+        max_variable_steps=16,
+        use_math_features=True,
+    )
+    out = model.latent_reasoning_sequence_loss(math_ids, op_ids, values, step_mask)
+    pred_active, pred_ops, pred_values = model.latent_reasoning_sequence.predict_structured(
+        math_ids
+    )
+    traces = model.solve_variable_reasoning_texts(math_ids, latent_reasoning_values=True)
+
+    assert out["loss"].ndim == 0
+    assert out["latent_reasoning_cosine"].ndim == 0
+    assert out["latent_reasoning_active_acc"].ndim == 0
+    assert out["latent_reasoning_final_acc"].ndim == 0
+    assert pred_active.shape == (4, 17)
+    assert pred_ops.shape == (4, 17)
+    assert pred_values.shape == (4, 17, 3)
+    assert len(traces) == 4
+
+
 def test_variable_reasoner_digit_value_round_trip():
     values = torch.tensor([-91.0, 0.0, 22.0, 4127.0])
     sign, digits = MathJEPAReadout(

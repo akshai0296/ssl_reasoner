@@ -59,6 +59,29 @@ trace:  3*4=12,2+12=14,14-1=13,13
 answer: 13
 ```
 
+### Latent Reasoning Sequence
+
+This path is the first implementation of the joint-embedding reasoning idea:
+
+```text
+problem math features
+  -> latent reasoning sequence predictor
+  -> z_step1, z_step2, ..., z_final
+  -> structured decoder heads
+  -> lhs/op/rhs/result fields + final answer
+```
+
+Target step embeddings are built from the structured trace fields:
+
+```text
+lhs, op, rhs, result, step position -> z_target_step
+final result, final position        -> z_target_final
+```
+
+Training uses latent matching, in-batch contrastive loss, hard negatives, active/stop
+prediction, operation decoding, and value decoding. This is now implemented as a
+trainable baseline, but it is not yet the strongest solver.
+
 ### Experimental Standalone Transition
 
 The standalone transition tries to learn a single arithmetic reduction:
@@ -197,6 +220,15 @@ PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
   --preset all
 ```
 
+Evaluate the latent reasoning sequence:
+
+```bash
+PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
+  --checkpoint checkpoints/latent_reasoning_sequence/best.pt \
+  --latent-reasoning-values \
+  --preset in_dist
+```
+
 ## Current Results
 
 ### Default Math Solver
@@ -253,6 +285,22 @@ Interpretation:
 - The next real improvement should add explicit carry/borrow supervision for `+`/`-` and
   partial-product accumulation states for `*`.
 
+### Latent Reasoning Sequence
+
+A 100-step smoke run confirms the stage trains and saves:
+
+| Metric | Step 1 | Step 100 |
+| --- | ---: | ---: |
+| active accuracy | `0.642` | `0.962` |
+| operation accuracy | `0.221` | `0.754` |
+| value accuracy | `0.000` | `0.051` |
+| final accuracy | `0.000` | `0.078` |
+
+The 50-sample trace eval after this short smoke run is still `0.000`; this is expected
+for such a small run. The important change is architectural: the repo now has a real
+latent step sequence with target embeddings, predicted embeddings, contrastive negatives,
+and structured decoding.
+
 ## Training
 
 Smoke train:
@@ -265,6 +313,12 @@ Train the variable reasoner:
 
 ```bash
 bash scripts/train_variable_reasoner.sh
+```
+
+Train the latent reasoning sequence:
+
+```bash
+bash scripts/train_latent_reasoning_sequence.sh
 ```
 
 Train standalone transition on reduction states:

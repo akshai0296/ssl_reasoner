@@ -68,6 +68,7 @@ def solve_variable_debug(
         standalone_factor_values=value_mode == "standalone_factor",
         standalone_decomposed_values=value_mode == "standalone_decomposed",
         standalone_hybrid_values=value_mode == "standalone_hybrid",
+        latent_reasoning_values=value_mode == "latent_reasoning",
     )
     rows = []
     for problem, trace in zip(problems, traces):
@@ -117,6 +118,7 @@ def main() -> None:
             "standalone_factor",
             "standalone_decomposed",
             "standalone_hybrid",
+            "latent_reasoning",
         ],
         default="candidate",
     )

@@ -15,6 +15,7 @@ TRACE_STATE_SCALE = 100.0
 VARIABLE_REASONING_SCALE = 100.0
 RAW_VARIABLE_VALUE_LOSS_WEIGHT = 0.01
 MAX_VARIABLE_REASONING_STEPS = 16
+LATENT_REASONING_TEMPERATURE = 0.07
 TRANSITION_DIGITS = 5
 TRANSITION_VALUE_MIN = -1000
 TRANSITION_VALUE_MAX = 10000
@@ -1328,6 +1329,310 @@ class VariableStructuredReasoner(nn.Module):
         }
 
 
+class ReasoningStepTargetEncoder(nn.Module):
+    def __init__(self, d_model: int, max_steps: int):
+        super().__init__()
+        self.max_steps = max_steps
+        self.value_embed = nn.Embedding(TRANSITION_VALUE_CLASSES, d_model)
+        self.op_embed = nn.Embedding(4, d_model)
+        self.kind_embed = nn.Embedding(2, d_model)
+        self.position_embed = nn.Embedding(max_steps + 1, d_model)
+        self.net = nn.Sequential(
+            nn.LayerNorm(d_model * 5 + 3),
+            nn.Linear(d_model * 5 + 3, d_model * 3),
+            nn.GELU(),
+            nn.Linear(d_model * 3, d_model),
+            nn.LayerNorm(d_model),
+        )
+
+    @staticmethod
+    def value_to_class(values: torch.Tensor) -> torch.Tensor:
+        return values.round().long().clamp(
+            min=TRANSITION_VALUE_MIN,
+            max=TRANSITION_VALUE_MAX,
+        ) - TRANSITION_VALUE_MIN
+
+    @staticmethod
+    def class_to_value(class_ids: torch.Tensor) -> torch.Tensor:
+        return class_ids.long() + TRANSITION_VALUE_MIN
+
+    def forward(
+        self,
+        op_ids: torch.Tensor,
+        values: torch.Tensor,
+        kind_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        batch, states = op_ids.shape
+        position_ids = torch.arange(states, device=op_ids.device).unsqueeze(0).expand(
+            batch, -1
+        )
+        lhs = values[:, :, 0]
+        rhs = values[:, :, 1]
+        result = values[:, :, 2]
+        features = torch.stack(
+            [
+                lhs / 1000.0,
+                rhs / 1000.0,
+                result / 1000.0,
+            ],
+            dim=-1,
+        )
+        encoded = torch.cat(
+            [
+                self.op_embed(op_ids.clamp(min=0, max=3).long()),
+                self.value_embed(self.value_to_class(lhs)),
+                self.value_embed(self.value_to_class(rhs)),
+                self.value_embed(self.value_to_class(result)),
+                self.kind_embed(kind_ids.clamp(min=0, max=1).long())
+                + self.position_embed(position_ids.clamp(max=self.max_steps)),
+                features,
+            ],
+            dim=-1,
+        )
+        return F.normalize(self.net(encoded), dim=-1)
+
+
+class LatentReasoningSequencePredictor(nn.Module):
+    def __init__(
+        self,
+        math_vocab_size: int,
+        d_model: int,
+        max_math_len: int,
+        max_steps: int,
+        num_heads: int = 4,
+        num_layers: int = 2,
+    ):
+        super().__init__()
+        self.max_steps = max_steps
+        self.token_embed = nn.Embedding(math_vocab_size, d_model, padding_idx=0)
+        self.math_pos_embed = nn.Parameter(torch.randn(1, max_math_len, d_model) * 0.02)
+        self.query_embed = nn.Parameter(torch.randn(1, max_steps + 1, d_model) * 0.02)
+        self.kind_embed = nn.Embedding(2, d_model)
+        layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=num_heads,
+            dim_feedforward=d_model * 4,
+            batch_first=True,
+            norm_first=True,
+            activation="gelu",
+        )
+        self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers)
+        self.out = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+            nn.LayerNorm(d_model),
+        )
+
+    def forward(self, math_ids: torch.Tensor) -> torch.Tensor:
+        batch = math_ids.size(0)
+        math_tokens = self.token_embed(math_ids) + self.math_pos_embed[:, : math_ids.size(1)]
+        query_tokens = self.query_embed.expand(batch, -1, -1).clone()
+        kind_ids = torch.zeros(
+            self.max_steps + 1,
+            device=math_ids.device,
+            dtype=torch.long,
+        )
+        kind_ids[-1] = 1
+        query_tokens = query_tokens + self.kind_embed(kind_ids).unsqueeze(0)
+        tokens = torch.cat([math_tokens, query_tokens], dim=1)
+        math_mask = math_ids.ne(0)
+        query_mask = torch.ones(
+            batch,
+            self.max_steps + 1,
+            device=math_ids.device,
+            dtype=torch.bool,
+        )
+        mask = torch.cat([math_mask, query_mask], dim=1)
+        encoded = self.encoder(tokens, src_key_padding_mask=~mask)
+        reasoning = encoded[:, -self.max_steps - 1 :]
+        return F.normalize(self.out(reasoning), dim=-1)
+
+
+class LatentReasoningSequence(nn.Module):
+    def __init__(
+        self,
+        math_vocab_size: int,
+        d_model: int,
+        max_math_len: int,
+        max_steps: int,
+        num_heads: int = 4,
+    ):
+        super().__init__()
+        self.max_steps = max_steps
+        self.target_encoder = ReasoningStepTargetEncoder(d_model, max_steps)
+        self.predictor = LatentReasoningSequencePredictor(
+            math_vocab_size,
+            d_model,
+            max_math_len,
+            max_steps,
+            num_heads=num_heads,
+        )
+        self.active_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, 1),
+        )
+        self.op_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, 4),
+        )
+        self.value_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model * 2),
+            nn.GELU(),
+            nn.Linear(d_model * 2, 3 * TRANSITION_VALUE_CLASSES),
+        )
+
+    def _targets(
+        self,
+        op_ids: torch.Tensor,
+        values: torch.Tensor,
+        step_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch = op_ids.size(0)
+        final_index = step_mask.sum(dim=1).long().sub(1).clamp(min=0)
+        final_result = values[
+            torch.arange(batch, device=values.device),
+            final_index,
+            2,
+        ]
+        final_values = values.new_zeros(batch, 1, 3)
+        final_values[:, 0, 2] = final_result
+        all_values = torch.cat([values, final_values], dim=1)
+        final_ops = op_ids.new_zeros(batch, 1)
+        all_ops = torch.cat([op_ids, final_ops], dim=1)
+        final_mask = step_mask.new_ones(batch, 1)
+        all_mask = torch.cat([step_mask, final_mask], dim=1)
+        kind_ids = op_ids.new_zeros(batch, self.max_steps + 1)
+        kind_ids[:, -1] = 1
+        return all_ops, all_values, all_mask, kind_ids
+
+    def _decode(
+        self,
+        embeddings: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        active_logits = self.active_head(embeddings).squeeze(-1)
+        op_logits = self.op_head(embeddings)
+        value_logits = self.value_head(embeddings).view(
+            embeddings.size(0),
+            embeddings.size(1),
+            3,
+            TRANSITION_VALUE_CLASSES,
+        )
+        return active_logits, op_logits, value_logits
+
+    def loss(
+        self,
+        math_ids: torch.Tensor,
+        op_ids: torch.Tensor,
+        values: torch.Tensor,
+        step_mask: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        all_ops, all_values, all_mask, kind_ids = self._targets(op_ids, values, step_mask)
+        target = self.target_encoder(all_ops, all_values, kind_ids).detach()
+        pred = self.predictor(math_ids)
+        per_state = F.smooth_l1_loss(pred, target, reduction="none").mean(dim=-1)
+        latent_loss = (per_state * all_mask).sum() / all_mask.sum().clamp(min=1.0)
+        cosine = (pred * target).sum(dim=-1)
+        cosine_acc = (cosine * all_mask).sum() / all_mask.sum().clamp(min=1.0)
+
+        flat_mask = all_mask.reshape(-1).bool()
+        flat_pred = pred.reshape(-1, pred.size(-1))[flat_mask]
+        flat_target = target.reshape(-1, target.size(-1))[flat_mask]
+        logits = flat_pred @ flat_target.t() / LATENT_REASONING_TEMPERATURE
+        labels = torch.arange(flat_pred.size(0), device=flat_pred.device)
+        contrastive_loss = F.cross_entropy(logits, labels)
+
+        hard_values = all_values.reshape(-1, 3)[flat_mask].unsqueeze(1).repeat(1, 3, 1)
+        hard_ops = all_ops.reshape(-1)[flat_mask].unsqueeze(1).repeat(1, 3)
+        hard_values[:, 0, 2] = hard_values[:, 0, 2] + 1.0
+        hard_values[:, 1, 2] = hard_values[:, 1, 2] - 1.0
+        hard_ops[:, 2] = torch.where(
+            hard_ops[:, 2].eq(3),
+            torch.ones_like(hard_ops[:, 2]),
+            hard_ops[:, 2] + 1,
+        )
+        hard_kind = kind_ids.reshape(-1)[flat_mask].unsqueeze(1).expand(-1, 3)
+        hard_target = self.target_encoder(
+            hard_ops,
+            hard_values,
+            hard_kind,
+        ).detach()
+        hard_scores = (flat_pred.unsqueeze(1) * hard_target).sum(dim=-1)
+        pos_scores = (flat_pred * flat_target).sum(dim=-1, keepdim=True)
+        hard_logits = torch.cat([pos_scores, hard_scores], dim=1) / LATENT_REASONING_TEMPERATURE
+        hard_loss = F.cross_entropy(
+            hard_logits,
+            torch.zeros(flat_pred.size(0), device=flat_pred.device, dtype=torch.long),
+        )
+
+        active_logits, op_logits, value_logits = self._decode(pred)
+        active_loss = F.binary_cross_entropy_with_logits(active_logits, all_mask)
+        value_targets = ReasoningStepTargetEncoder.value_to_class(all_values)
+        op_loss = F.cross_entropy(
+            op_logits.reshape(-1, 4),
+            all_ops.reshape(-1),
+            reduction="none",
+        ).view_as(all_mask)
+        op_loss = (op_loss * all_mask).sum() / all_mask.sum().clamp(min=1.0)
+        value_loss = F.cross_entropy(
+            value_logits.reshape(-1, TRANSITION_VALUE_CLASSES),
+            value_targets.reshape(-1),
+            reduction="none",
+        ).view(all_mask.size(0), all_mask.size(1), 3)
+        value_field_mask = all_mask.unsqueeze(-1).expand_as(value_loss).clone()
+        value_field_mask[:, -1, :2] = 0.0
+        value_loss = (value_loss * value_field_mask).sum() / value_field_mask.sum().clamp(min=1.0)
+
+        op_acc = (
+            (op_logits.argmax(dim=-1) == all_ops).float() * all_mask
+        ).sum() / all_mask.sum().clamp(min=1.0)
+        active_acc = (active_logits.sigmoid().ge(0.5) == all_mask.bool()).float().mean()
+        value_acc = (
+            (value_logits.argmax(dim=-1) == value_targets).float() * value_field_mask
+        ).sum() / value_field_mask.sum().clamp(min=1.0)
+        final_acc = (
+            value_logits[:, -1, 2].argmax(dim=-1) == value_targets[:, -1, 2]
+        ).float().mean()
+        loss = (
+            latent_loss
+            + 0.2 * contrastive_loss
+            + 0.2 * hard_loss
+            + active_loss
+            + op_loss
+            + value_loss
+        )
+        return {
+            "loss": loss,
+            "latent_reasoning_latent_loss": latent_loss,
+            "latent_reasoning_contrastive_loss": contrastive_loss,
+            "latent_reasoning_hard_negative_loss": hard_loss,
+            "latent_reasoning_active_loss": active_loss,
+            "latent_reasoning_op_loss": op_loss,
+            "latent_reasoning_value_loss": value_loss,
+            "latent_reasoning_cosine": cosine_acc,
+            "latent_reasoning_active_acc": active_acc,
+            "latent_reasoning_op_acc": op_acc,
+            "latent_reasoning_value_acc": value_acc,
+            "latent_reasoning_final_acc": final_acc,
+        }
+
+    @torch.no_grad()
+    def predict_structured(
+        self,
+        math_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        pred = self.predictor(math_ids)
+        active_logits, op_logits, value_logits = self._decode(pred)
+        values = ReasoningStepTargetEncoder.class_to_value(value_logits.argmax(dim=-1))
+        return active_logits.sigmoid().ge(0.5), op_logits.argmax(dim=-1), values
+
+
 class StateConditionedSlotProjector(nn.Module):
     def __init__(self, d_model: int, num_slots: int):
         super().__init__()
@@ -1425,6 +1730,13 @@ class MathJEPAReadout(nn.Module):
         )
         self.variable_structured_reasoner = VariableStructuredReasoner(
             math_vocab_size, d_model, max_math_len, max_steps=max_variable_steps
+        )
+        self.latent_reasoning_sequence = LatentReasoningSequence(
+            math_vocab_size,
+            d_model,
+            max_math_len,
+            max_steps=max_variable_steps,
+            num_heads=num_heads,
         )
         self.standalone_transition = StandaloneArithmeticTransition(d_model)
         self.state_conditioned_projector = StateConditionedSlotProjector(
@@ -1824,6 +2136,20 @@ class MathJEPAReadout(nn.Module):
             variable_trace_mask,
         )
 
+    def latent_reasoning_sequence_loss(
+        self,
+        math_ids: torch.Tensor,
+        variable_trace_op_ids: torch.Tensor,
+        variable_trace_values: torch.Tensor,
+        variable_trace_mask: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        return self.latent_reasoning_sequence.loss(
+            math_ids,
+            variable_trace_op_ids,
+            variable_trace_values,
+            variable_trace_mask,
+        )
+
     def standalone_transition_loss(
         self,
         variable_trace_op_ids: torch.Tensor,
@@ -2072,6 +2398,26 @@ class MathJEPAReadout(nn.Module):
         if int(order_id) == 1:
             return f"{b}{op2}{c}={first},{a}{op1}{first}={final},{final}"
         return f"{a}{op1}{b}={first},{first}{op2}{c}={final},{final}"
+
+    @classmethod
+    def _render_latent_reasoning_row(
+        cls,
+        active: list[bool],
+        op_ids: list[int],
+        value_rows: list[list[int]],
+    ) -> str:
+        parts = []
+        for is_active, op_id, values in zip(active[:-1], op_ids[:-1], value_rows[:-1]):
+            if not is_active:
+                continue
+            op = cls._trace_op_to_text(op_id)
+            if not op:
+                continue
+            lhs, rhs, result = values
+            parts.append(f"{lhs}{op}{rhs}={result}")
+        final = value_rows[-1][2]
+        parts.append(str(final))
+        return ",".join(parts)
 
     def answer_value_loss(
         self, slots: torch.Tensor, answer_value_id: torch.Tensor
@@ -2643,7 +2989,17 @@ class MathJEPAReadout(nn.Module):
         standalone_factor_values: bool = False,
         standalone_decomposed_values: bool = False,
         standalone_hybrid_values: bool = False,
+        latent_reasoning_values: bool = False,
     ) -> list[str]:
+        if latent_reasoning_values:
+            active, op_ids, values = self.latent_reasoning_sequence.predict_structured(math_ids)
+            active_rows = active.detach().cpu().tolist()
+            op_rows = op_ids.detach().cpu().tolist()
+            value_rows = values.detach().cpu().tolist()
+            return [
+                self._render_latent_reasoning_row(active_row, op_row, value_row)
+                for active_row, op_row, value_row in zip(active_rows, op_rows, value_rows)
+            ]
         math_rows = math_ids.detach().cpu().tolist()
         hidden_rows = self.variable_structured_reasoner.initial_hidden(math_ids)
         traces = []
