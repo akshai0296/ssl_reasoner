@@ -1506,6 +1506,15 @@ class LatentReasoningSequence(nn.Module):
             nn.GELU(),
             nn.Linear(d_model * 2, TRANSITION_DIGITS * LATENT_REASONING_CARRY_CLASSES),
         )
+        process_feature_dim = TRANSITION_DIGITS * (
+            10 + LATENT_REASONING_CARRY_CLASSES
+        )
+        self.process_conditioned_value_head = nn.Sequential(
+            nn.LayerNorm(d_model + process_feature_dim),
+            nn.Linear(d_model + process_feature_dim, d_model * 2),
+            nn.GELU(),
+            nn.Linear(d_model * 2, 3 * TRANSITION_VALUE_CLASSES),
+        )
 
     @staticmethod
     def value_to_sign_digits(values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1628,6 +1637,7 @@ class LatentReasoningSequence(nn.Module):
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
+        torch.Tensor,
     ]:
         active_logits = self.active_head(embeddings).squeeze(-1)
         op_logits = self.op_head(embeddings)
@@ -1663,6 +1673,21 @@ class LatentReasoningSequence(nn.Module):
             TRANSITION_DIGITS,
             LATENT_REASONING_CARRY_CLASSES,
         )
+        process_features = torch.cat(
+            [
+                process_digit_logits.softmax(dim=-1).flatten(start_dim=2),
+                process_carry_logits.softmax(dim=-1).flatten(start_dim=2),
+            ],
+            dim=-1,
+        )
+        process_value_logits = self.process_conditioned_value_head(
+            torch.cat([embeddings, process_features], dim=-1)
+        ).view(
+            embeddings.size(0),
+            embeddings.size(1),
+            3,
+            TRANSITION_VALUE_CLASSES,
+        )
         return (
             active_logits,
             op_logits,
@@ -1671,6 +1696,7 @@ class LatentReasoningSequence(nn.Module):
             digit_value_logits,
             process_digit_logits,
             process_carry_logits,
+            process_value_logits,
         )
 
     def loss(
@@ -1726,6 +1752,7 @@ class LatentReasoningSequence(nn.Module):
             digit_value_logits,
             process_digit_logits,
             process_carry_logits,
+            process_value_logits,
         ) = self._decode(pred)
         active_loss = F.binary_cross_entropy_with_logits(active_logits, all_mask)
         value_targets = ReasoningStepTargetEncoder.value_to_class(all_values)
@@ -1751,6 +1778,14 @@ class LatentReasoningSequence(nn.Module):
         value_field_mask = all_mask.unsqueeze(-1).expand_as(value_loss).clone()
         value_field_mask[:, -1, :2] = 0.0
         value_loss = (value_loss * value_field_mask).sum() / value_field_mask.sum().clamp(min=1.0)
+        process_value_loss = F.cross_entropy(
+            process_value_logits.reshape(-1, TRANSITION_VALUE_CLASSES),
+            value_targets.reshape(-1),
+            reduction="none",
+        ).view(all_mask.size(0), all_mask.size(1), 3)
+        process_value_loss = (
+            process_value_loss * value_field_mask
+        ).sum() / value_field_mask.sum().clamp(min=1.0)
         sign_loss = F.cross_entropy(
             sign_logits.reshape(-1, 2),
             sign_targets.reshape(-1),
@@ -1801,6 +1836,12 @@ class LatentReasoningSequence(nn.Module):
         final_acc = (
             value_logits[:, -1, 2].argmax(dim=-1) == value_targets[:, -1, 2]
         ).float().mean()
+        process_value_acc = (
+            (process_value_logits.argmax(dim=-1) == value_targets).float() * value_field_mask
+        ).sum() / value_field_mask.sum().clamp(min=1.0)
+        process_final_acc = (
+            process_value_logits[:, -1, 2].argmax(dim=-1) == value_targets[:, -1, 2]
+        ).float().mean()
         digit_values = self.sign_digits_to_value(
             sign_logits.argmax(dim=-1),
             digit_value_logits.argmax(dim=-1),
@@ -1826,6 +1867,7 @@ class LatentReasoningSequence(nn.Module):
             + active_loss
             + op_loss
             + value_loss
+            + process_value_loss
             + sign_loss
             + digit_loss
             + process_digit_loss
@@ -1839,6 +1881,7 @@ class LatentReasoningSequence(nn.Module):
             "latent_reasoning_active_loss": active_loss,
             "latent_reasoning_op_loss": op_loss,
             "latent_reasoning_value_loss": value_loss,
+            "latent_reasoning_process_value_loss": process_value_loss,
             "latent_reasoning_digit_sign_loss": sign_loss,
             "latent_reasoning_digit_value_loss": digit_loss,
             "latent_reasoning_process_digit_loss": process_digit_loss,
@@ -1848,6 +1891,8 @@ class LatentReasoningSequence(nn.Module):
             "latent_reasoning_op_acc": op_acc,
             "latent_reasoning_value_acc": value_acc,
             "latent_reasoning_final_acc": final_acc,
+            "latent_reasoning_process_value_acc": process_value_acc,
+            "latent_reasoning_process_final_acc": process_final_acc,
             "latent_reasoning_digit_value_acc": digit_value_acc,
             "latent_reasoning_digit_final_acc": digit_final_acc,
             "latent_reasoning_process_digit_acc": process_digit_acc,
@@ -1869,9 +1914,14 @@ class LatentReasoningSequence(nn.Module):
             digit_value_logits,
             _process_digit_logits,
             _process_carry_logits,
+            process_value_logits,
         ) = self._decode(pred)
         if value_mode == "class":
             values = ReasoningStepTargetEncoder.class_to_value(value_logits.argmax(dim=-1))
+        elif value_mode == "process":
+            values = ReasoningStepTargetEncoder.class_to_value(
+                process_value_logits.argmax(dim=-1)
+            )
         elif value_mode == "digit":
             values = self.sign_digits_to_value(
                 sign_logits.argmax(dim=-1),
@@ -3240,11 +3290,23 @@ class MathJEPAReadout(nn.Module):
         standalone_hybrid_values: bool = False,
         latent_reasoning_values: bool = False,
         latent_reasoning_digit_values: bool = False,
+        latent_reasoning_process_values: bool = False,
     ) -> list[str]:
-        if latent_reasoning_values or latent_reasoning_digit_values:
+        if (
+            latent_reasoning_values
+            or latent_reasoning_digit_values
+            or latent_reasoning_process_values
+        ):
+            value_mode = (
+                "process"
+                if latent_reasoning_process_values
+                else "digit"
+                if latent_reasoning_digit_values
+                else "class"
+            )
             active, op_ids, values = self.latent_reasoning_sequence.predict_structured(
                 math_ids,
-                value_mode="digit" if latent_reasoning_digit_values else "class",
+                value_mode=value_mode,
             )
             active_rows = active.detach().cpu().tolist()
             op_rows = op_ids.detach().cpu().tolist()

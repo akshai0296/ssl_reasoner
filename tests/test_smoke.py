@@ -710,7 +710,14 @@ def test_latent_reasoning_sequence_loss_and_decode():
     pred_active, pred_ops, pred_values = model.latent_reasoning_sequence.predict_structured(
         math_ids
     )
+    process_active, process_ops, process_values = (
+        model.latent_reasoning_sequence.predict_structured(math_ids, value_mode="process")
+    )
     traces = model.solve_variable_reasoning_texts(math_ids, latent_reasoning_values=True)
+    process_traces = model.solve_variable_reasoning_texts(
+        math_ids,
+        latent_reasoning_process_values=True,
+    )
 
     assert out["loss"].ndim == 0
     assert out["latent_reasoning_cosine"].ndim == 0
@@ -718,12 +725,18 @@ def test_latent_reasoning_sequence_loss_and_decode():
     assert out["latent_reasoning_final_acc"].ndim == 0
     assert out["latent_reasoning_digit_value_acc"].ndim == 0
     assert out["latent_reasoning_digit_final_acc"].ndim == 0
+    assert out["latent_reasoning_process_value_acc"].ndim == 0
+    assert out["latent_reasoning_process_final_acc"].ndim == 0
     assert out["latent_reasoning_process_digit_acc"].ndim == 0
     assert out["latent_reasoning_process_carry_acc"].ndim == 0
     assert pred_active.shape == (4, 17)
     assert pred_ops.shape == (4, 17)
     assert pred_values.shape == (4, 17, 3)
+    assert process_active.shape == (4, 17)
+    assert process_ops.shape == (4, 17)
+    assert process_values.shape == (4, 17, 3)
     assert len(traces) == 4
+    assert len(process_traces) == 4
 
 
 def test_variable_reasoner_digit_value_round_trip():

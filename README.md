@@ -232,6 +232,11 @@ PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
   --checkpoint checkpoints/latent_reasoning_sequence_digit/best.pt \
   --latent-reasoning-digit-values \
   --preset in_dist
+
+PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
+  --checkpoint checkpoints/latent_reasoning_sequence_process_conditioned_smoke/best.pt \
+  --latent-reasoning-process-values \
+  --preset in_dist
 ```
 
 ## Current Results
@@ -368,6 +373,42 @@ Interpretation: the auxiliary arithmetic-process heads are learnable, especially
 state, but they are not yet coupled tightly enough to force the final decoded value to be
 correct. The next version should feed predicted carry/borrow states into the value
 decoder, not only train them as auxiliary heads.
+
+The process-conditioned value decoder feeds predicted result-digit and carry/borrow
+probabilities into a second bounded value head. This tests whether the learned arithmetic
+process state can improve the decoded `lhs`, `rhs`, and `result` fields instead of only
+being an auxiliary target. Starting from
+`checkpoints/latent_reasoning_sequence_process_smoke/best.pt` and training for 1000
+steps gives:
+
+| Metric | Step 1 | Step 1000 |
+| --- | ---: | ---: |
+| class value accuracy | `0.318` | `0.362` |
+| class final accuracy | `0.125` | `0.094` |
+| process-conditioned value accuracy | `0.000` | `0.324` |
+| process-conditioned final accuracy | `0.000` | `0.125` |
+| process digit accuracy | `0.557` | `0.577` |
+| process carry accuracy | `0.871` | `0.875` |
+
+Public 200-sample eval for
+`checkpoints/latent_reasoning_sequence_process_conditioned_smoke/best.pt`:
+
+| Preset | Class answer | Class trace | Process answer | Process trace |
+| --- | ---: | ---: | ---: | ---: |
+| `in_dist` | `0.015` | `0.005` | `0.010` | `0.000` |
+| `larger_numbers` | `0.000` | `0.000` | `0.000` | `0.000` |
+| `longer_expr` | `0.015` | `0.000` | `0.015` | `0.000` |
+| `no_multiply` | `0.050` | `0.000` | `0.025` | `0.000` |
+| `many_multiply` | `0.075` | `0.035` | `0.045` | `0.005` |
+| `length_8` | `0.000` | `0.000` | `0.010` | `0.000` |
+| `length_16` | `0.000` | `0.000` | `0.000` | `0.000` |
+
+Interpretation: process-conditioned decoding is learnable, but it does not yet improve
+end-to-end exact reasoning. The main remaining problem is that the predicted latent
+states do not preserve enough operand identity and intermediate numeric state for exact
+multi-step traces. The next useful direction is to make the latent reasoner recurrently
+consume its previous predicted state and train step-local negatives that swap operands,
+operators, and intermediate results.
 
 ## Training
 
