@@ -216,6 +216,7 @@ def evaluate_preset(
         or args.latent_reasoning_digit_values
         or args.latent_reasoning_process_values
         or args.latent_reasoning_state_values
+        or args.latent_reasoning_slot_values
     ):
         max_math_len = train_args.get("max_math_len", 8)
         all_math_ids = torch.tensor(
@@ -243,6 +244,7 @@ def evaluate_preset(
                     latent_reasoning_digit_values=args.latent_reasoning_digit_values,
                     latent_reasoning_process_values=args.latent_reasoning_process_values,
                     latent_reasoning_state_values=args.latent_reasoning_state_values,
+                    latent_reasoning_slot_values=args.latent_reasoning_slot_values,
                 )
             )
 
@@ -333,6 +335,7 @@ def evaluate_problem(
         latent_reasoning_digit_values=args.latent_reasoning_digit_values,
         latent_reasoning_process_values=args.latent_reasoning_process_values,
         latent_reasoning_state_values=args.latent_reasoning_state_values,
+        latent_reasoning_slot_values=args.latent_reasoning_slot_values,
     )
     pred_trace = traces[0]
     final = trace_final_value(pred_trace)
@@ -384,6 +387,7 @@ def main() -> None:
     parser.add_argument("--latent-reasoning-digit-values", action="store_true")
     parser.add_argument("--latent-reasoning-process-values", action="store_true")
     parser.add_argument("--latent-reasoning-state-values", action="store_true")
+    parser.add_argument("--latent-reasoning-slot-values", action="store_true")
     parser.add_argument("--unconstrained", action="store_true")
     args = parser.parse_args()
 

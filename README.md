@@ -593,6 +593,43 @@ reaches `0.100`, the best public latent-sequence scores so far. The next step sh
 constrain value decoding using the predicted state slots rather than only concatenating
 state probabilities into another value head.
 
+The slot-selection decoder predicts which pre-reduction expression slots contain
+`lhs`, `rhs`, and `op`, then decodes the result separately. For step `t`, the selector
+uses the initial expression state for `t=0` and the predicted post-reduction state from
+`t-1` for later steps. This directly tests whether the latent reasoner can stop
+inventing operands and instead point to operands in the current expression state.
+Starting from `checkpoints/latent_reasoning_sequence_state_conditioned_smoke/best.pt`
+with partial loading and training for 1000 steps gives:
+
+| Metric | Step 1 | Step 1000 |
+| --- | ---: | ---: |
+| slot lhs accuracy | `0.009` | `0.914` |
+| slot rhs accuracy | `0.072` | `0.921` |
+| slot op accuracy | `0.316` | `0.918` |
+| slot pair accuracy | `0.000` | `0.911` |
+| slot result accuracy | `0.000` | `0.194` |
+| slot final accuracy | `0.000` | `0.188` |
+| class final accuracy | `0.344` | `0.406` |
+| process final accuracy | `0.375` | `0.453` |
+
+Public 200-sample eval for `checkpoints/latent_reasoning_sequence_slot_smoke/best.pt`:
+
+| Preset | Class answer | Class trace | Process answer | Process trace | Slot answer | Slot trace |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `in_dist` | `0.065` | `0.020` | `0.065` | `0.010` | `0.020` | `0.000` |
+| `larger_numbers` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` |
+| `longer_expr` | `0.040` | `0.000` | `0.025` | `0.000` | `0.005` | `0.000` |
+| `no_multiply` | `0.075` | `0.000` | `0.100` | `0.000` | `0.025` | `0.000` |
+| `many_multiply` | `0.130` | `0.095` | `0.110` | `0.070` | `0.045` | `0.000` |
+| `length_8` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` |
+| `length_16` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` |
+
+Interpretation: slot selection works: the model learns to pick the correct operand and
+operator slots with about `0.91` pair accuracy. The slot inference path is still worse
+because result decoding from the selected slots is weak. This isolates the next
+bottleneck: keep the slot selector, but replace the free slot result head with a
+selected-operand arithmetic transition head.
+
 ## Training
 
 Smoke train:

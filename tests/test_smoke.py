@@ -723,6 +723,9 @@ def test_latent_reasoning_sequence_loss_and_decode():
     state_active, state_ops, state_values = (
         model.latent_reasoning_sequence.predict_structured(math_ids, value_mode="state")
     )
+    slot_active, slot_ops, slot_values = (
+        model.latent_reasoning_sequence.predict_structured(math_ids, value_mode="slot")
+    )
     traces = model.solve_variable_reasoning_texts(math_ids, latent_reasoning_values=True)
     process_traces = model.solve_variable_reasoning_texts(
         math_ids,
@@ -731,6 +734,10 @@ def test_latent_reasoning_sequence_loss_and_decode():
     state_traces = model.solve_variable_reasoning_texts(
         math_ids,
         latent_reasoning_state_values=True,
+    )
+    slot_traces = model.solve_variable_reasoning_texts(
+        math_ids,
+        latent_reasoning_slot_values=True,
     )
 
     assert out["loss"].ndim == 0
@@ -744,6 +751,12 @@ def test_latent_reasoning_sequence_loss_and_decode():
     assert out["latent_reasoning_state_conditioned_op_acc"].ndim == 0
     assert out["latent_reasoning_state_conditioned_value_acc"].ndim == 0
     assert out["latent_reasoning_state_conditioned_final_acc"].ndim == 0
+    assert out["latent_reasoning_slot_lhs_acc"].ndim == 0
+    assert out["latent_reasoning_slot_rhs_acc"].ndim == 0
+    assert out["latent_reasoning_slot_op_acc"].ndim == 0
+    assert out["latent_reasoning_slot_pair_acc"].ndim == 0
+    assert out["latent_reasoning_slot_result_acc"].ndim == 0
+    assert out["latent_reasoning_slot_final_acc"].ndim == 0
     assert out["latent_reasoning_process_digit_acc"].ndim == 0
     assert out["latent_reasoning_process_carry_acc"].ndim == 0
     assert out["latent_reasoning_state_value_acc"].ndim == 0
@@ -759,9 +772,13 @@ def test_latent_reasoning_sequence_loss_and_decode():
     assert state_active.shape == (4, 17)
     assert state_ops.shape == (4, 17)
     assert state_values.shape == (4, 17, 3)
+    assert slot_active.shape == (4, 17)
+    assert slot_ops.shape == (4, 17)
+    assert slot_values.shape == (4, 17, 3)
     assert len(traces) == 4
     assert len(process_traces) == 4
     assert len(state_traces) == 4
+    assert len(slot_traces) == 4
 
 
 def test_variable_reasoner_digit_value_round_trip():
