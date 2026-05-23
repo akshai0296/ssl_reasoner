@@ -866,6 +866,39 @@ predicted operands is too abrupt. The predicted state values/selected operands a
 too noisy, so the next training change should ramp predicted-slot digit weight gradually
 or freeze the selector/state decoder while training the digit head.
 
+A frozen-head stage was added for that isolation experiment:
+
+```bash
+--stages latent_reasoning_slot_digit_head
+```
+
+This freezes the latent predictor, state decoder, and slot selector, then trains only
+`latent_reasoning_sequence.slot_digit_result_head`. Starting from the teacher-warmup
+checkpoint with high predicted-slot digit weight gave:
+
+| Metric | Teacher warmup | Frozen digit-head |
+| --- | ---: | ---: |
+| slot pair accuracy | `0.943` | `0.880` |
+| slot-digit result accuracy | `0.333` | `0.156` |
+| predicted-slot digit result accuracy | `0.142` | `0.112` |
+| predicted-slot digit arithmetic-valid accuracy | `0.339` | `0.156` |
+| slot-digit carry accuracy | `0.945` | `0.919` |
+
+Public 200-sample eval for
+`checkpoints/latent_reasoning_slot_digit_head_predicted/best.pt`:
+
+| Mode | `in_dist` answer | `no_multiply` answer | `many_multiply` answer | trace |
+| --- | ---: | ---: | ---: | ---: |
+| slot-digit | `0.020` | `0.030` | `0.040` | `0.000` |
+| slot-transition | `0.040` | `0.080` | `0.080` | `0.000` |
+| class | `0.060` | `0.130` | `0.120` | up to `0.070` |
+
+Interpretation: freezing the upstream path did not improve predicted-slot digit
+decoding. The bottleneck is therefore not mainly moving-target training instability; it
+is the quality of the predicted operands/state slots themselves. The next useful change
+should directly improve state-slot numeric identity, for example with a copy/update
+state model that preserves unreduced values and writes only the reduced result slot.
+
 ## Training
 
 Smoke train:

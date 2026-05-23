@@ -593,7 +593,7 @@ def run_stage(
                     variable_trace_legal_mask,
                     variable_trace_mask,
                 )
-            elif name == "latent_reasoning_sequence":
+            elif name in {"latent_reasoning_sequence", "latent_reasoning_slot_digit_head"}:
                 out = model.latent_reasoning_sequence_loss(
                     math_ids,
                     variable_trace_op_ids,
@@ -842,6 +842,7 @@ def run_stage(
                     "variable_digit_value_head",
                     "variable_class_value_head",
                     "latent_reasoning_sequence",
+                    "latent_reasoning_slot_digit_head",
                     "standalone_transition",
                     "state_conditioned_latent",
                     "state_conditioned_joint",
@@ -915,7 +916,7 @@ def run_stage(
                             ),
                         ).item()
                     )
-                    if name == "latent_reasoning_sequence"
+                    if name in {"latent_reasoning_sequence", "latent_reasoning_slot_digit_head"}
                     else variable_unconstrained_trace_acc
                     + 0.001 * float(out.get("variable_class_value_acc", torch.tensor(0.0)).item())
                     if name == "variable_class_value_head"
@@ -1571,6 +1572,35 @@ def main() -> None:
         )
         best_acc = run_stage(
             name="latent_reasoning_sequence",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.variable_reasoner_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
+
+    if (
+        "latent_reasoning_slot_digit_head" in requested_stages
+        or "lrsdh" in requested_stages
+    ):
+        for module in model.children():
+            _set_trainable(module, False)
+        _set_trainable(model.latent_reasoning_sequence.slot_digit_result_head, True)
+        optimizer = torch.optim.AdamW(
+            model.latent_reasoning_sequence.slot_digit_result_head.parameters(),
+            lr=args.lr,
+            weight_decay=0.01,
+        )
+        best_acc = run_stage(
+            name="latent_reasoning_slot_digit_head",
             model=model,
             loader=loader,
             val_dataset=val_dataset,
