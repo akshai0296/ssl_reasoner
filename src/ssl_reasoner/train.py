@@ -798,6 +798,16 @@ def run_stage(
                         "latent_reasoning_result_state_value_acc",
                         "latent_reasoning_pre_slot_operand_value_acc",
                         "latent_reasoning_pre_slot_op_acc",
+                        "latent_reasoning_teacher_copy_update_value_acc",
+                        "latent_reasoning_teacher_copy_update_value_mask_acc",
+                        "latent_reasoning_teacher_copy_update_op_acc",
+                        "latent_reasoning_teacher_copy_update_op_mask_acc",
+                        "latent_reasoning_predicted_copy_update_value_acc",
+                        "latent_reasoning_predicted_copy_update_value_mask_acc",
+                        "latent_reasoning_predicted_copy_update_op_acc",
+                        "latent_reasoning_predicted_copy_update_op_mask_acc",
+                        "latent_reasoning_copy_update_value_acc",
+                        "latent_reasoning_copy_update_value_improvement",
                     }
                 )
                 print(

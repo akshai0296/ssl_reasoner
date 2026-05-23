@@ -818,6 +818,9 @@ def test_latent_reasoning_sequence_loss_and_decode():
     assert out["latent_reasoning_result_state_value_acc"].ndim == 0
     assert out["latent_reasoning_pre_slot_operand_value_acc"].ndim == 0
     assert out["latent_reasoning_pre_slot_op_acc"].ndim == 0
+    assert out["latent_reasoning_teacher_copy_update_value_acc"].ndim == 0
+    assert out["latent_reasoning_predicted_copy_update_value_acc"].ndim == 0
+    assert out["latent_reasoning_copy_update_value_improvement"].ndim == 0
     assert pred_active.shape == (4, 17)
     assert pred_ops.shape == (4, 17)
     assert pred_values.shape == (4, 17, 3)

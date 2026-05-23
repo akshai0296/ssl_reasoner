@@ -899,6 +899,36 @@ is the quality of the predicted operands/state slots themselves. The next useful
 should directly improve state-slot numeric identity, for example with a copy/update
 state model that preserves unreduced values and writes only the reduced result slot.
 
+The copy/update state path is now implemented as a constrained diagnostic. Instead of
+regenerating every next-state slot, it applies this update rule:
+
+```text
+pre-state values + selected lhs/rhs + result
+  -> copy values before lhs
+  -> write result into lhs slot
+  -> shift values after rhs left
+
+pre-state ops + selected op
+  -> copy ops before selected op
+  -> shift ops after selected op left
+```
+
+The model reports both oracle and predicted copy/update metrics:
+
+| Metric | Diagnostic value |
+| --- | ---: |
+| oracle copy/update value accuracy | `1.000` |
+| oracle copy/update op accuracy | `1.000` |
+| predicted copy/update value accuracy | `0.233` |
+| predicted copy/update op accuracy | `0.595` |
+| direct decoded state value accuracy | `0.060` |
+| copy/update value improvement | `+0.173` |
+
+Interpretation: the structural update rule works exactly when given correct slots and
+results, and even with predicted slots/results it preserves state values much better
+than direct state decoding. The remaining issue is now sharply isolated: improve the
+predicted action/result quality that feeds the copy/update rule.
+
 ## Training
 
 Smoke train:

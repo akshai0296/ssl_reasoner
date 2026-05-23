@@ -2174,6 +2174,69 @@ class LatentReasoningSequence(nn.Module):
         )
         return sign_logits, digit_logits, carry_logits
 
+    @staticmethod
+    def copy_update_state(
+        pre_values: torch.Tensor,
+        pre_value_mask: torch.Tensor,
+        pre_ops: torch.Tensor,
+        pre_op_mask: torch.Tensor,
+        lhs_slots: torch.Tensor,
+        rhs_slots: torch.Tensor,
+        op_slots: torch.Tensor,
+        result_values: torch.Tensor,
+        step_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        next_values = pre_values.new_zeros(pre_values.shape)
+        next_value_mask = pre_value_mask.new_zeros(pre_value_mask.shape)
+        next_ops = pre_ops.new_zeros(pre_ops.shape)
+        next_op_mask = pre_op_mask.new_zeros(pre_op_mask.shape)
+        batch, steps, value_slots = pre_values.shape
+        op_slots_count = pre_ops.size(-1)
+        for row_idx in range(batch):
+            for step_idx in range(steps):
+                if float(step_mask[row_idx, step_idx]) < 0.5:
+                    continue
+                value_count = int(pre_value_mask[row_idx, step_idx].sum().item())
+                op_count = int(pre_op_mask[row_idx, step_idx].sum().item())
+                lhs_idx = int(lhs_slots[row_idx, step_idx].item())
+                rhs_idx = int(rhs_slots[row_idx, step_idx].item())
+                op_idx = int(op_slots[row_idx, step_idx].item())
+                if (
+                    value_count <= 0
+                    or op_count <= 0
+                    or lhs_idx < 0
+                    or rhs_idx < 0
+                    or op_idx < 0
+                    or lhs_idx >= value_count
+                    or rhs_idx >= value_count
+                    or op_idx >= op_count
+                    or rhs_idx <= lhs_idx
+                ):
+                    continue
+                current_values = pre_values[row_idx, step_idx, :value_count]
+                updated_values = torch.cat(
+                    [
+                        current_values[:lhs_idx],
+                        result_values[row_idx, step_idx].reshape(1).to(pre_values.dtype),
+                        current_values[rhs_idx + 1 :],
+                    ],
+                    dim=0,
+                )[:value_slots]
+                value_len = updated_values.numel()
+                next_values[row_idx, step_idx, :value_len] = updated_values
+                next_value_mask[row_idx, step_idx, :value_len] = 1.0
+
+                current_ops = pre_ops[row_idx, step_idx, :op_count]
+                updated_ops = torch.cat(
+                    [current_ops[:op_idx], current_ops[op_idx + 1 :]],
+                    dim=0,
+                )[:op_slots_count]
+                op_len = updated_ops.numel()
+                if op_len:
+                    next_ops[row_idx, step_idx, :op_len] = updated_ops
+                    next_op_mask[row_idx, step_idx, :op_len] = 1.0
+        return next_values, next_value_mask, next_ops, next_op_mask
+
     def loss(
         self,
         math_ids: torch.Tensor,
@@ -2358,6 +2421,28 @@ class LatentReasoningSequence(nn.Module):
         )
         state_value_mask = state_value_mask * all_mask.unsqueeze(-1)
         state_op_mask = state_op_mask * all_mask.unsqueeze(-1)
+        (
+            initial_values,
+            initial_value_mask,
+            initial_ops,
+            initial_op_mask,
+        ) = self.initial_expression_state(math_ids, self.max_steps)
+        target_pre_values = torch.cat(
+            [initial_values.unsqueeze(1), state_values[:, :-1]],
+            dim=1,
+        )[:, : self.max_steps]
+        target_pre_value_mask = torch.cat(
+            [initial_value_mask.unsqueeze(1), state_value_mask[:, :-1]],
+            dim=1,
+        )[:, : self.max_steps]
+        target_pre_ops = torch.cat(
+            [initial_ops.unsqueeze(1), state_ops[:, :-1]],
+            dim=1,
+        )[:, : self.max_steps]
+        target_pre_op_mask = torch.cat(
+            [initial_op_mask.unsqueeze(1), state_op_mask[:, :-1]],
+            dim=1,
+        )[:, : self.max_steps]
         state_sign_targets, state_digit_targets = self.value_to_sign_digits(
             state_values.reshape(-1)
         )
@@ -2910,6 +2995,90 @@ class LatentReasoningSequence(nn.Module):
             ).float()
             * transition_mask
         ).sum() / transition_mask.sum().clamp(min=1.0)
+        teacher_copy_values, teacher_copy_value_mask, teacher_copy_ops, teacher_copy_op_mask = (
+            self.copy_update_state(
+                target_pre_values,
+                target_pre_value_mask,
+                target_pre_ops,
+                target_pre_op_mask,
+                lhs_slot_targets,
+                rhs_slot_targets,
+                op_slot_targets,
+                all_values[:, : self.max_steps, 2].round().long(),
+                slot_step_mask,
+            )
+        )
+        predicted_pre_value_mask = torch.cat(
+            [
+                initial_value_mask.unsqueeze(1),
+                state_value_active_logits[:, :-1].sigmoid().ge(0.5).to(state_value_mask.dtype),
+            ],
+            dim=1,
+        )[:, : self.max_steps]
+        predicted_pre_op_mask = torch.cat(
+            [
+                initial_op_mask.unsqueeze(1),
+                state_op_active_logits[:, :-1].sigmoid().ge(0.5).to(state_op_mask.dtype),
+            ],
+            dim=1,
+        )[:, : self.max_steps]
+        (
+            predicted_copy_values,
+            predicted_copy_value_mask,
+            predicted_copy_ops,
+            predicted_copy_op_mask,
+        ) = self.copy_update_state(
+            pred_pre_values[:, : self.max_steps],
+            predicted_pre_value_mask,
+            pred_pre_ops[:, : self.max_steps],
+            predicted_pre_op_mask,
+            pred_lhs_slots[:, : self.max_steps],
+            pred_rhs_slots[:, : self.max_steps],
+            pred_op_slots[:, : self.max_steps],
+            ReasoningStepTargetEncoder.class_to_value(
+                predicted_slot_transition_result_logits[:, : self.max_steps].argmax(dim=-1)
+            ),
+            slot_step_mask,
+        )
+        target_post_values = state_values[:, : self.max_steps].round().long()
+        target_post_value_mask = state_value_mask[:, : self.max_steps]
+        target_post_ops = state_ops[:, : self.max_steps]
+        target_post_op_mask = state_op_mask[:, : self.max_steps]
+        teacher_copy_value_acc = (
+            (teacher_copy_values.round().long() == target_post_values).float()
+            * target_post_value_mask
+        ).sum() / target_post_value_mask.sum().clamp(min=1.0)
+        teacher_copy_value_mask_acc = (
+            teacher_copy_value_mask.bool() == target_post_value_mask.bool()
+        ).float().mean()
+        teacher_copy_op_acc = (
+            (teacher_copy_ops == target_post_ops).float() * target_post_op_mask
+        ).sum() / target_post_op_mask.sum().clamp(min=1.0)
+        teacher_copy_op_mask_acc = (
+            teacher_copy_op_mask.bool() == target_post_op_mask.bool()
+        ).float().mean()
+        predicted_copy_value_acc = (
+            (predicted_copy_values.round().long() == target_post_values).float()
+            * target_post_value_mask
+        ).sum() / target_post_value_mask.sum().clamp(min=1.0)
+        predicted_copy_value_mask_acc = (
+            predicted_copy_value_mask.bool() == target_post_value_mask.bool()
+        ).float().mean()
+        predicted_copy_op_acc = (
+            (predicted_copy_ops == target_post_ops).float() * target_post_op_mask
+        ).sum() / target_post_op_mask.sum().clamp(min=1.0)
+        predicted_copy_op_mask_acc = (
+            predicted_copy_op_mask.bool() == target_post_op_mask.bool()
+        ).float().mean()
+        decoded_state_values_for_copy = self.sign_digits_to_value(
+            state_value_sign_logits.argmax(dim=-1),
+            state_value_digit_logits.argmax(dim=-1),
+        )
+        copy_update_value_acc = (
+            (decoded_state_values_for_copy[:, : self.max_steps] == target_post_values).float()
+            * target_post_value_mask
+        ).sum() / target_post_value_mask.sum().clamp(min=1.0)
+        copy_update_improvement = predicted_copy_value_acc - copy_update_value_acc
         process_value_acc = (
             (process_value_logits.argmax(dim=-1) == value_targets).float() * value_field_mask
         ).sum() / value_field_mask.sum().clamp(min=1.0)
@@ -3099,6 +3268,22 @@ class LatentReasoningSequence(nn.Module):
             "latent_reasoning_result_state_value_acc": result_state_value_acc,
             "latent_reasoning_pre_slot_operand_value_acc": pre_slot_operand_value_acc,
             "latent_reasoning_pre_slot_op_acc": pre_slot_op_acc,
+            "latent_reasoning_teacher_copy_update_value_acc": teacher_copy_value_acc,
+            "latent_reasoning_teacher_copy_update_value_mask_acc": (
+                teacher_copy_value_mask_acc
+            ),
+            "latent_reasoning_teacher_copy_update_op_acc": teacher_copy_op_acc,
+            "latent_reasoning_teacher_copy_update_op_mask_acc": teacher_copy_op_mask_acc,
+            "latent_reasoning_predicted_copy_update_value_acc": predicted_copy_value_acc,
+            "latent_reasoning_predicted_copy_update_value_mask_acc": (
+                predicted_copy_value_mask_acc
+            ),
+            "latent_reasoning_predicted_copy_update_op_acc": predicted_copy_op_acc,
+            "latent_reasoning_predicted_copy_update_op_mask_acc": (
+                predicted_copy_op_mask_acc
+            ),
+            "latent_reasoning_copy_update_value_acc": copy_update_value_acc,
+            "latent_reasoning_copy_update_value_improvement": copy_update_improvement,
         }
 
     @torch.no_grad()
