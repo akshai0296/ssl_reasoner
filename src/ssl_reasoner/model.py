@@ -1561,6 +1561,24 @@ class LatentReasoningSequence(nn.Module):
             nn.GELU(),
             nn.Linear(d_model, max_steps),
         )
+        state_feature_dim = (
+            (max_steps + 1) * (2 + TRANSITION_DIGITS * 10)
+            + (max_steps + 1)
+            + max_steps * 4
+            + max_steps
+        )
+        self.state_conditioned_op_head = nn.Sequential(
+            nn.LayerNorm(d_model + state_feature_dim),
+            nn.Linear(d_model + state_feature_dim, d_model * 2),
+            nn.GELU(),
+            nn.Linear(d_model * 2, 4),
+        )
+        self.state_conditioned_value_head = nn.Sequential(
+            nn.LayerNorm(d_model + state_feature_dim),
+            nn.Linear(d_model + state_feature_dim, d_model * 2),
+            nn.GELU(),
+            nn.Linear(d_model * 2, 3 * TRANSITION_VALUE_CLASSES),
+        )
 
     @staticmethod
     def value_to_sign_digits(values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1818,6 +1836,74 @@ class LatentReasoningSequence(nn.Module):
             process_value_logits,
         )
 
+    def _state_logits(
+        self,
+        embeddings: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        state_value_logits = self.state_value_head(embeddings).view(
+            embeddings.size(0),
+            embeddings.size(1),
+            self.max_steps + 1,
+            2 + TRANSITION_DIGITS * 10,
+        )
+        state_value_active_logits = self.state_value_active_head(embeddings)
+        state_op_logits = self.state_op_head(embeddings).view(
+            embeddings.size(0),
+            embeddings.size(1),
+            self.max_steps,
+            4,
+        )
+        state_op_active_logits = self.state_op_active_head(embeddings)
+        return (
+            state_value_logits,
+            state_value_active_logits,
+            state_op_logits,
+            state_op_active_logits,
+        )
+
+    def _state_features(
+        self,
+        state_value_logits: torch.Tensor,
+        state_value_active_logits: torch.Tensor,
+        state_op_logits: torch.Tensor,
+        state_op_active_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.cat(
+            [
+                state_value_logits.softmax(dim=-1).flatten(start_dim=2),
+                state_value_active_logits.sigmoid(),
+                state_op_logits.softmax(dim=-1).flatten(start_dim=2),
+                state_op_active_logits.sigmoid(),
+            ],
+            dim=-1,
+        )
+
+    def _state_conditioned_decode(
+        self,
+        embeddings: torch.Tensor,
+        state_value_logits: torch.Tensor,
+        state_value_active_logits: torch.Tensor,
+        state_op_logits: torch.Tensor,
+        state_op_active_logits: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        state_features = self._state_features(
+            state_value_logits,
+            state_value_active_logits,
+            state_op_logits,
+            state_op_active_logits,
+        )
+        state_input = torch.cat([embeddings, state_features], dim=-1)
+        state_conditioned_op_logits = self.state_conditioned_op_head(state_input)
+        state_conditioned_value_logits = self.state_conditioned_value_head(
+            state_input
+        ).view(
+            embeddings.size(0),
+            embeddings.size(1),
+            3,
+            TRANSITION_VALUE_CLASSES,
+        )
+        return state_conditioned_op_logits, state_conditioned_value_logits
+
     def loss(
         self,
         math_ids: torch.Tensor,
@@ -1870,11 +1956,11 @@ class LatentReasoningSequence(nn.Module):
             -1,
             hard_count,
         )
-        position_ids = torch.arange(
+        hard_position_ids = torch.arange(
             all_ops.size(1),
             device=all_ops.device,
         ).unsqueeze(0).expand_as(all_ops)
-        hard_positions = position_ids.reshape(-1)[flat_mask].unsqueeze(1).expand(
+        hard_positions = hard_position_ids.reshape(-1)[flat_mask].unsqueeze(1).expand(
             -1,
             hard_count,
         )
@@ -1902,12 +1988,12 @@ class LatentReasoningSequence(nn.Module):
             process_carry_logits,
             process_value_logits,
         ) = self._decode(pred)
-        state_value_logits = self.state_value_head(pred).view(
-            pred.size(0),
-            pred.size(1),
-            self.max_steps + 1,
-            2 + TRANSITION_DIGITS * 10,
-        )
+        (
+            state_value_logits,
+            state_value_active_logits,
+            state_op_logits,
+            state_op_active_logits,
+        ) = self._state_logits(pred)
         state_value_sign_logits = state_value_logits[:, :, :, :2]
         state_value_digit_logits = state_value_logits[:, :, :, 2:].view(
             pred.size(0),
@@ -1916,14 +2002,15 @@ class LatentReasoningSequence(nn.Module):
             TRANSITION_DIGITS,
             10,
         )
-        state_value_active_logits = self.state_value_active_head(pred)
-        state_op_logits = self.state_op_head(pred).view(
-            pred.size(0),
-            pred.size(1),
-            self.max_steps,
-            4,
+        state_conditioned_op_logits, state_conditioned_value_logits = (
+            self._state_conditioned_decode(
+                pred,
+                state_value_logits,
+                state_value_active_logits,
+                state_op_logits,
+                state_op_active_logits,
+            )
         )
-        state_op_active_logits = self.state_op_active_head(pred)
         state_values, state_value_mask, state_ops, state_op_mask = (
             self.expression_state_targets(
                 math_ids,
@@ -1998,6 +2085,14 @@ class LatentReasoningSequence(nn.Module):
             reduction="none",
         ).view_as(all_mask)
         op_loss = (op_loss * all_mask).sum() / all_mask.sum().clamp(min=1.0)
+        state_conditioned_op_loss = F.cross_entropy(
+            state_conditioned_op_logits.reshape(-1, 4),
+            all_ops.reshape(-1),
+            reduction="none",
+        ).view_as(all_mask)
+        state_conditioned_op_loss = (
+            state_conditioned_op_loss * all_mask
+        ).sum() / all_mask.sum().clamp(min=1.0)
         value_loss = F.cross_entropy(
             value_logits.reshape(-1, TRANSITION_VALUE_CLASSES),
             value_targets.reshape(-1),
@@ -2006,6 +2101,14 @@ class LatentReasoningSequence(nn.Module):
         value_field_mask = all_mask.unsqueeze(-1).expand_as(value_loss).clone()
         value_field_mask[:, -1, :2] = 0.0
         value_loss = (value_loss * value_field_mask).sum() / value_field_mask.sum().clamp(min=1.0)
+        state_conditioned_value_loss = F.cross_entropy(
+            state_conditioned_value_logits.reshape(-1, TRANSITION_VALUE_CLASSES),
+            value_targets.reshape(-1),
+            reduction="none",
+        ).view(all_mask.size(0), all_mask.size(1), 3)
+        state_conditioned_value_loss = (
+            state_conditioned_value_loss * value_field_mask
+        ).sum() / value_field_mask.sum().clamp(min=1.0)
         process_value_loss = F.cross_entropy(
             process_value_logits.reshape(-1, TRANSITION_VALUE_CLASSES),
             value_targets.reshape(-1),
@@ -2057,12 +2160,23 @@ class LatentReasoningSequence(nn.Module):
         op_acc = (
             (op_logits.argmax(dim=-1) == all_ops).float() * all_mask
         ).sum() / all_mask.sum().clamp(min=1.0)
+        state_conditioned_op_acc = (
+            (state_conditioned_op_logits.argmax(dim=-1) == all_ops).float() * all_mask
+        ).sum() / all_mask.sum().clamp(min=1.0)
         active_acc = (active_logits.sigmoid().ge(0.5) == all_mask.bool()).float().mean()
         value_acc = (
             (value_logits.argmax(dim=-1) == value_targets).float() * value_field_mask
         ).sum() / value_field_mask.sum().clamp(min=1.0)
         final_acc = (
             value_logits[:, -1, 2].argmax(dim=-1) == value_targets[:, -1, 2]
+        ).float().mean()
+        state_conditioned_value_acc = (
+            (state_conditioned_value_logits.argmax(dim=-1) == value_targets).float()
+            * value_field_mask
+        ).sum() / value_field_mask.sum().clamp(min=1.0)
+        state_conditioned_final_acc = (
+            state_conditioned_value_logits[:, -1, 2].argmax(dim=-1)
+            == value_targets[:, -1, 2]
         ).float().mean()
         process_value_acc = (
             (process_value_logits.argmax(dim=-1) == value_targets).float() * value_field_mask
@@ -2114,7 +2228,9 @@ class LatentReasoningSequence(nn.Module):
             + state_op_active_loss
             + active_loss
             + op_loss
+            + state_conditioned_op_loss
             + value_loss
+            + state_conditioned_value_loss
             + process_value_loss
             + sign_loss
             + digit_loss
@@ -2132,6 +2248,8 @@ class LatentReasoningSequence(nn.Module):
             "latent_reasoning_state_value_active_loss": state_value_active_loss,
             "latent_reasoning_state_op_loss": state_op_loss,
             "latent_reasoning_state_op_active_loss": state_op_active_loss,
+            "latent_reasoning_state_conditioned_op_loss": state_conditioned_op_loss,
+            "latent_reasoning_state_conditioned_value_loss": state_conditioned_value_loss,
             "latent_reasoning_active_loss": active_loss,
             "latent_reasoning_op_loss": op_loss,
             "latent_reasoning_value_loss": value_loss,
@@ -2143,8 +2261,11 @@ class LatentReasoningSequence(nn.Module):
             "latent_reasoning_cosine": cosine_acc,
             "latent_reasoning_active_acc": active_acc,
             "latent_reasoning_op_acc": op_acc,
+            "latent_reasoning_state_conditioned_op_acc": state_conditioned_op_acc,
             "latent_reasoning_value_acc": value_acc,
             "latent_reasoning_final_acc": final_acc,
+            "latent_reasoning_state_conditioned_value_acc": state_conditioned_value_acc,
+            "latent_reasoning_state_conditioned_final_acc": state_conditioned_final_acc,
             "latent_reasoning_process_value_acc": process_value_acc,
             "latent_reasoning_process_final_acc": process_final_acc,
             "latent_reasoning_digit_value_acc": digit_value_acc,
@@ -2174,20 +2295,43 @@ class LatentReasoningSequence(nn.Module):
             _process_carry_logits,
             process_value_logits,
         ) = self._decode(pred)
+        (
+            state_value_logits,
+            state_value_active_logits,
+            state_op_logits,
+            state_op_active_logits,
+        ) = self._state_logits(pred)
+        state_conditioned_op_logits, state_conditioned_value_logits = (
+            self._state_conditioned_decode(
+                pred,
+                state_value_logits,
+                state_value_active_logits,
+                state_op_logits,
+                state_op_active_logits,
+            )
+        )
         if value_mode == "class":
             values = ReasoningStepTargetEncoder.class_to_value(value_logits.argmax(dim=-1))
+            decoded_op_logits = op_logits
         elif value_mode == "process":
             values = ReasoningStepTargetEncoder.class_to_value(
                 process_value_logits.argmax(dim=-1)
             )
+            decoded_op_logits = op_logits
+        elif value_mode == "state":
+            values = ReasoningStepTargetEncoder.class_to_value(
+                state_conditioned_value_logits.argmax(dim=-1)
+            )
+            decoded_op_logits = state_conditioned_op_logits
         elif value_mode == "digit":
             values = self.sign_digits_to_value(
                 sign_logits.argmax(dim=-1),
                 digit_value_logits.argmax(dim=-1),
             )
+            decoded_op_logits = op_logits
         else:
             raise ValueError(f"Unknown latent reasoning value_mode: {value_mode}")
-        return active_logits.sigmoid().ge(0.5), op_logits.argmax(dim=-1), values
+        return active_logits.sigmoid().ge(0.5), decoded_op_logits.argmax(dim=-1), values
 
 
 class StateConditionedSlotProjector(nn.Module):
@@ -3551,13 +3695,18 @@ class MathJEPAReadout(nn.Module):
         latent_reasoning_values: bool = False,
         latent_reasoning_digit_values: bool = False,
         latent_reasoning_process_values: bool = False,
+        latent_reasoning_state_values: bool = False,
     ) -> list[str]:
         if (
             latent_reasoning_values
             or latent_reasoning_digit_values
             or latent_reasoning_process_values
+            or latent_reasoning_state_values
         ):
             value_mode = (
+                "state"
+                if latent_reasoning_state_values
+                else
                 "process"
                 if latent_reasoning_process_values
                 else "digit"

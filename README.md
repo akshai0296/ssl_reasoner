@@ -554,6 +554,45 @@ the internal final-value metric compared with the regression checkpoint, so the 
 step is to use predicted expression state as a constraint or feature for the next-step
 decoder instead of treating it as only an auxiliary loss.
 
+The state-conditioned step decoder feeds predicted expression-state distributions into
+additional operation and value heads for each reasoning step. This tests whether the
+model can use its predicted "remaining expression" state to choose the next operation
+and decode the step values. Starting from
+`checkpoints/latent_reasoning_sequence_state_digit_smoke/best.pt` with partial loading
+and training for 1000 steps gives:
+
+| Metric | Step 1 | Step 1000 |
+| --- | ---: | ---: |
+| class value accuracy | `0.469` | `0.508` |
+| class final accuracy | `0.281` | `0.438` |
+| process-conditioned value accuracy | `0.451` | `0.476` |
+| process-conditioned final accuracy | `0.297` | `0.391` |
+| state-conditioned op accuracy | `0.177` | `0.958` |
+| state-conditioned value accuracy | `0.000` | `0.380` |
+| state-conditioned final accuracy | `0.000` | `0.203` |
+| state op accuracy | `0.365` | `0.605` |
+
+Public 200-sample eval for
+`checkpoints/latent_reasoning_sequence_state_conditioned_smoke/best.pt`:
+
+| Preset | Class answer | Class trace | Process answer | Process trace | State answer | State trace |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `in_dist` | `0.070` | `0.010` | `0.065` | `0.015` | `0.040` | `0.000` |
+| `larger_numbers` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` |
+| `longer_expr` | `0.015` | `0.000` | `0.030` | `0.005` | `0.015` | `0.000` |
+| `no_multiply` | `0.115` | `0.000` | `0.095` | `0.000` | `0.060` | `0.000` |
+| `many_multiply` | `0.140` | `0.100` | `0.140` | `0.095` | `0.055` | `0.025` |
+| `length_8` | `0.000` | `0.000` | `0.005` | `0.000` | `0.005` | `0.000` |
+| `length_16` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` |
+
+Interpretation: state-conditioned operation decoding works well, but
+state-conditioned value decoding is still weaker than the older class/process value
+heads. Training the extra state-conditioned path still improves the shared latent
+representation: class in-dist answer reaches `0.070` and many-multiply class trace
+reaches `0.100`, the best public latent-sequence scores so far. The next step should
+constrain value decoding using the predicted state slots rather than only concatenating
+state probabilities into another value head.
+
 ## Training
 
 Smoke train:

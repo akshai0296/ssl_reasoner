@@ -71,6 +71,7 @@ def solve_variable_debug(
         latent_reasoning_values=value_mode == "latent_reasoning",
         latent_reasoning_digit_values=value_mode == "latent_reasoning_digit",
         latent_reasoning_process_values=value_mode == "latent_reasoning_process",
+        latent_reasoning_state_values=value_mode == "latent_reasoning_state",
     )
     rows = []
     for problem, trace in zip(problems, traces):
@@ -123,6 +124,7 @@ def main() -> None:
             "latent_reasoning",
             "latent_reasoning_digit",
             "latent_reasoning_process",
+            "latent_reasoning_state",
         ],
         default="candidate",
     )

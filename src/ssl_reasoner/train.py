@@ -758,8 +758,11 @@ def run_stage(
                         "latent_reasoning_cosine",
                         "latent_reasoning_active_acc",
                         "latent_reasoning_op_acc",
+                        "latent_reasoning_state_conditioned_op_acc",
                         "latent_reasoning_value_acc",
                         "latent_reasoning_final_acc",
+                        "latent_reasoning_state_conditioned_value_acc",
+                        "latent_reasoning_state_conditioned_final_acc",
                         "latent_reasoning_digit_value_acc",
                         "latent_reasoning_digit_final_acc",
                         "latent_reasoning_process_value_acc",
@@ -848,14 +851,20 @@ def run_stage(
                     else float(
                         torch.maximum(
                             torch.maximum(
-                                out.get("latent_reasoning_final_acc", torch.tensor(0.0)),
+                                torch.maximum(
+                                    out.get("latent_reasoning_final_acc", torch.tensor(0.0)),
+                                    out.get(
+                                        "latent_reasoning_digit_final_acc",
+                                        torch.tensor(0.0),
+                                    ),
+                                ),
                                 out.get(
-                                    "latent_reasoning_digit_final_acc",
+                                    "latent_reasoning_process_final_acc",
                                     torch.tensor(0.0),
                                 ),
                             ),
                             out.get(
-                                "latent_reasoning_process_final_acc",
+                                "latent_reasoning_state_conditioned_final_acc",
                                 torch.tensor(0.0),
                             ),
                         ).item()
