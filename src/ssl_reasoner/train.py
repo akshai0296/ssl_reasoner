@@ -783,6 +783,9 @@ def run_stage(
                         "latent_reasoning_state_value_active_acc",
                         "latent_reasoning_state_op_acc",
                         "latent_reasoning_state_op_active_acc",
+                        "latent_reasoning_result_state_value_acc",
+                        "latent_reasoning_pre_slot_operand_value_acc",
+                        "latent_reasoning_pre_slot_op_acc",
                     }
                 )
                 print(

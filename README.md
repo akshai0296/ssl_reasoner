@@ -738,6 +738,49 @@ value quality: the selector can point to slots, but the values inside those pred
 slots are often wrong. The next improvement should train the expression-state value
 decoder much more strongly before relying on it for slot-transition inference.
 
+The state-focused objective increases supervision on the expression-state decoder and
+adds losses exactly where inference uses the state:
+
+```text
+post-step state slot at reduction position -> result value
+pre-step selected lhs/rhs slots            -> lhs/rhs values
+pre-step selected op slot                  -> op id
+```
+
+Starting from
+`checkpoints/latent_reasoning_sequence_predslot_transition_smoke/best.pt` with partial
+loading and training for 1000 steps gives:
+
+| Metric | Step 1 | Step 1000 |
+| --- | ---: | ---: |
+| slot pair accuracy | `0.889` | `0.932` |
+| state value accuracy | `0.043` | `0.071` |
+| result-in-state value accuracy | `0.022` | `0.060` |
+| pre-slot operand value accuracy | `0.044` | `0.073` |
+| pre-slot op accuracy | `0.707` | `0.871` |
+| slot-transition result accuracy | `0.351` | `0.432` |
+| predicted-slot transition result accuracy | `0.213` | `0.244` |
+| process final accuracy | `0.438` | `0.500` |
+
+Public 200-sample eval for
+`checkpoints/latent_reasoning_sequence_state_focused_smoke/best.pt`:
+
+| Preset | Class answer | Class trace | Slot-class answer | Slot-class trace | Slot-transition answer | Slot-transition trace |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `in_dist` | `0.055` | `0.010` | `0.055` | `0.000` | `0.050` | `0.000` |
+| `larger_numbers` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` |
+| `longer_expr` | `0.030` | `0.000` | `0.030` | `0.000` | `0.030` | `0.000` |
+| `no_multiply` | `0.120` | `0.000` | `0.120` | `0.000` | `0.090` | `0.000` |
+| `many_multiply` | `0.150` | `0.090` | `0.150` | `0.000` | `0.100` | `0.000` |
+| `length_8` | `0.015` | `0.000` | `0.015` | `0.000` | `0.010` | `0.000` |
+| `length_16` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` |
+
+Interpretation: the focused objective moves the right internal metrics, especially
+slot-transition result accuracy and pre-slot op recovery, but exact decoded state values
+remain far too low. The next architectural bottleneck is numeric state representation:
+the current fixed digit/class heads do not preserve exact intermediate values well enough
+for multi-step latent trace generation.
+
 ## Training
 
 Smoke train:

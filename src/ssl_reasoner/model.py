@@ -2387,6 +2387,144 @@ class LatentReasoningSequence(nn.Module):
         slot_op_loss = (
             slot_op_loss * slot_step_mask
         ).sum() / slot_step_mask.sum().clamp(min=1.0)
+        result_state_slots = position_ids[:, : self.max_steps].clamp(
+            min=0,
+            max=self.max_steps,
+        )
+        result_state_logits = state_value_logits[:, : self.max_steps].gather(
+            dim=2,
+            index=result_state_slots.unsqueeze(-1).unsqueeze(-1).expand(
+                -1,
+                -1,
+                -1,
+                state_value_logits.size(-1),
+            ),
+        ).squeeze(2)
+        result_state_sign_logits = result_state_logits[:, :, :2]
+        result_state_digit_logits = result_state_logits[:, :, 2:].view(
+            result_state_logits.size(0),
+            result_state_logits.size(1),
+            TRANSITION_DIGITS,
+            10,
+        )
+        result_state_sign_targets, result_state_digit_targets = self.value_to_sign_digits(
+            all_values[:, : self.max_steps, 2].reshape(-1)
+        )
+        result_state_sign_targets = result_state_sign_targets.view(
+            all_values.size(0),
+            self.max_steps,
+        )
+        result_state_digit_targets = result_state_digit_targets.view(
+            all_values.size(0),
+            self.max_steps,
+            TRANSITION_DIGITS,
+        )
+        result_state_sign_loss = F.cross_entropy(
+            result_state_sign_logits.reshape(-1, 2),
+            result_state_sign_targets.reshape(-1),
+            reduction="none",
+        ).view_as(slot_step_mask)
+        result_state_digit_loss = F.cross_entropy(
+            result_state_digit_logits.reshape(-1, 10),
+            result_state_digit_targets.reshape(-1),
+            reduction="none",
+        ).view(
+            all_values.size(0),
+            self.max_steps,
+            TRANSITION_DIGITS,
+        )
+        result_state_digit_loss = result_state_digit_loss.mean(dim=-1)
+        result_state_value_loss = (
+            (result_state_sign_loss + result_state_digit_loss) * slot_step_mask
+        ).sum() / slot_step_mask.sum().clamp(min=1.0)
+        if self.max_steps > 1:
+            pre_slot_mask = slot_step_mask[:, 1:]
+            pre_lhs_slots = lhs_slot_targets[:, 1:]
+            pre_rhs_slots = rhs_slot_targets[:, 1:]
+            pre_op_slots = op_slot_targets[:, 1:]
+            pre_state_value_logits = state_value_logits[:, : self.max_steps - 1]
+            pre_lhs_logits = pre_state_value_logits.gather(
+                dim=2,
+                index=pre_lhs_slots.unsqueeze(-1).unsqueeze(-1).expand(
+                    -1,
+                    -1,
+                    -1,
+                    state_value_logits.size(-1),
+                ),
+            ).squeeze(2)
+            pre_rhs_logits = pre_state_value_logits.gather(
+                dim=2,
+                index=pre_rhs_slots.unsqueeze(-1).unsqueeze(-1).expand(
+                    -1,
+                    -1,
+                    -1,
+                    state_value_logits.size(-1),
+                ),
+            ).squeeze(2)
+            pre_op_logits = state_op_logits[:, : self.max_steps - 1].gather(
+                dim=2,
+                index=pre_op_slots.unsqueeze(-1).unsqueeze(-1).expand(
+                    -1,
+                    -1,
+                    -1,
+                    state_op_logits.size(-1),
+                ),
+            ).squeeze(2)
+            pre_value_logits = torch.stack([pre_lhs_logits, pre_rhs_logits], dim=2)
+            pre_value_targets = all_values[:, 1 : self.max_steps, :2]
+            pre_sign_targets, pre_digit_targets = self.value_to_sign_digits(
+                pre_value_targets.reshape(-1)
+            )
+            pre_sign_targets = pre_sign_targets.view(
+                all_values.size(0),
+                self.max_steps - 1,
+                2,
+            )
+            pre_digit_targets = pre_digit_targets.view(
+                all_values.size(0),
+                self.max_steps - 1,
+                2,
+                TRANSITION_DIGITS,
+            )
+            pre_sign_logits = pre_value_logits[:, :, :, :2]
+            pre_digit_logits = pre_value_logits[:, :, :, 2:].view(
+                all_values.size(0),
+                self.max_steps - 1,
+                2,
+                TRANSITION_DIGITS,
+                10,
+            )
+            pre_sign_loss = F.cross_entropy(
+                pre_sign_logits.reshape(-1, 2),
+                pre_sign_targets.reshape(-1),
+                reduction="none",
+            ).view(all_values.size(0), self.max_steps - 1, 2)
+            pre_digit_loss = F.cross_entropy(
+                pre_digit_logits.reshape(-1, 10),
+                pre_digit_targets.reshape(-1),
+                reduction="none",
+            ).view(
+                all_values.size(0),
+                self.max_steps - 1,
+                2,
+                TRANSITION_DIGITS,
+            )
+            pre_digit_loss = pre_digit_loss.mean(dim=-1)
+            pre_value_mask = pre_slot_mask.unsqueeze(-1).expand_as(pre_sign_loss)
+            pre_slot_operand_value_loss = (
+                (pre_sign_loss + pre_digit_loss) * pre_value_mask
+            ).sum() / pre_value_mask.sum().clamp(min=1.0)
+            pre_slot_op_loss = F.cross_entropy(
+                pre_op_logits.reshape(-1, 4),
+                all_ops[:, 1 : self.max_steps].reshape(-1),
+                reduction="none",
+            ).view_as(pre_slot_mask)
+            pre_slot_op_loss = (
+                pre_slot_op_loss * pre_slot_mask
+            ).sum() / pre_slot_mask.sum().clamp(min=1.0)
+        else:
+            pre_slot_operand_value_loss = state_value_loss.new_tensor(0.0)
+            pre_slot_op_loss = state_value_loss.new_tensor(0.0)
         value_loss = F.cross_entropy(
             value_logits.reshape(-1, TRANSITION_VALUE_CLASSES),
             value_targets.reshape(-1),
@@ -2586,6 +2724,30 @@ class LatentReasoningSequence(nn.Module):
         state_value_acc = (
             (rounded_state_values == state_values).float() * state_value_mask
         ).sum() / state_value_mask.sum().clamp(min=1.0)
+        result_state_values = self.sign_digits_to_value(
+            result_state_sign_logits.argmax(dim=-1),
+            result_state_digit_logits.argmax(dim=-1),
+        )
+        result_state_value_acc = (
+            (result_state_values == all_values[:, : self.max_steps, 2].round().long()).float()
+            * slot_step_mask
+        ).sum() / slot_step_mask.sum().clamp(min=1.0)
+        if self.max_steps > 1:
+            pre_pred_values = self.sign_digits_to_value(
+                pre_sign_logits.argmax(dim=-1),
+                pre_digit_logits.argmax(dim=-1),
+            )
+            pre_slot_operand_value_acc = (
+                (pre_pred_values == pre_value_targets.round().long()).float()
+                * pre_value_mask
+            ).sum() / pre_value_mask.sum().clamp(min=1.0)
+            pre_slot_op_acc = (
+                (pre_op_logits.argmax(dim=-1) == all_ops[:, 1 : self.max_steps]).float()
+                * pre_slot_mask
+            ).sum() / pre_slot_mask.sum().clamp(min=1.0)
+        else:
+            pre_slot_operand_value_acc = state_value_acc.new_tensor(0.0)
+            pre_slot_op_acc = state_value_acc.new_tensor(0.0)
         state_value_active_acc = (
             state_value_active_logits.sigmoid().ge(0.5) == state_value_mask.bool()
         ).float().mean()
@@ -2599,10 +2761,13 @@ class LatentReasoningSequence(nn.Module):
             latent_loss
             + 0.2 * contrastive_loss
             + 0.5 * hard_loss
-            + 0.5 * state_value_loss
-            + state_value_active_loss
-            + state_op_loss
-            + state_op_active_loss
+            + 2.0 * state_value_loss
+            + 1.5 * state_value_active_loss
+            + 1.5 * state_op_loss
+            + 1.5 * state_op_active_loss
+            + 2.0 * result_state_value_loss
+            + 2.0 * pre_slot_operand_value_loss
+            + pre_slot_op_loss
             + active_loss
             + op_loss
             + state_conditioned_op_loss
@@ -2631,6 +2796,9 @@ class LatentReasoningSequence(nn.Module):
             "latent_reasoning_state_value_active_loss": state_value_active_loss,
             "latent_reasoning_state_op_loss": state_op_loss,
             "latent_reasoning_state_op_active_loss": state_op_active_loss,
+            "latent_reasoning_result_state_value_loss": result_state_value_loss,
+            "latent_reasoning_pre_slot_operand_value_loss": pre_slot_operand_value_loss,
+            "latent_reasoning_pre_slot_op_loss": pre_slot_op_loss,
             "latent_reasoning_state_conditioned_op_loss": state_conditioned_op_loss,
             "latent_reasoning_state_conditioned_value_loss": state_conditioned_value_loss,
             "latent_reasoning_slot_lhs_loss": slot_lhs_loss,
@@ -2681,6 +2849,9 @@ class LatentReasoningSequence(nn.Module):
             "latent_reasoning_state_value_active_acc": state_value_active_acc,
             "latent_reasoning_state_op_acc": state_op_acc,
             "latent_reasoning_state_op_active_acc": state_op_active_acc,
+            "latent_reasoning_result_state_value_acc": result_state_value_acc,
+            "latent_reasoning_pre_slot_operand_value_acc": pre_slot_operand_value_acc,
+            "latent_reasoning_pre_slot_op_acc": pre_slot_op_acc,
         }
 
     @torch.no_grad()
