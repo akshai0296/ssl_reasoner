@@ -821,6 +821,51 @@ competitive. Exact result digits are still the limiting factor, so this path nee
 longer curriculum or staged warmup where digit/carry accuracy is trained before it is
 used as the main inference decoder.
 
+Slot-digit curriculum weights can be changed from the training CLI:
+
+```bash
+--slot-digit-weight 4.0 \
+--slot-digit-carry-weight 1.0 \
+--predicted-slot-digit-weight 0.25 \
+--predicted-slot-digit-carry-weight 0.25
+```
+
+A teacher-forced warmup from
+`checkpoints/latent_reasoning_sequence_slot_digit_smoke/best.pt` improved the clean
+slot-digit path:
+
+| Metric | Before | Teacher warmup |
+| --- | ---: | ---: |
+| slot-digit result accuracy | `0.249` | `0.333` |
+| slot-digit final accuracy | `0.109` | `0.172` |
+| slot-digit carry accuracy | `0.941` | `0.945` |
+| predicted-slot digit result accuracy | `0.150` | `0.142` |
+| predicted-slot digit arithmetic-valid accuracy | `0.210` | `0.339` |
+| slot-transition result accuracy | `0.568` | `0.587` |
+
+A second phase with high predicted-slot digit weight did not improve the predicted-slot
+digit path:
+
+| Metric | Teacher warmup | Predicted-slot warmup |
+| --- | ---: | ---: |
+| slot-digit result accuracy | `0.333` | `0.186` |
+| predicted-slot digit result accuracy | `0.142` | `0.131` |
+| predicted-slot digit arithmetic-valid accuracy | `0.339` | `0.159` |
+| slot-transition result accuracy | `0.587` | `0.582` |
+
+Public 200-sample slot-digit eval:
+
+| Checkpoint | `in_dist` answer | `no_multiply` answer | `many_multiply` answer | trace |
+| --- | ---: | ---: | ---: | ---: |
+| slot-digit smoke | `0.015` | `0.070` | `0.040` | `0.000` |
+| teacher warmup | `0.025` | `0.035` | `0.040` | `0.000` |
+| predicted-slot warmup | `0.020` | `0.035` | `0.040` | `0.000` |
+
+Interpretation: teacher-forced warmup works for clean operands, but hard switching to
+predicted operands is too abrupt. The predicted state values/selected operands are still
+too noisy, so the next training change should ramp predicted-slot digit weight gradually
+or freeze the selector/state decoder while training the digit head.
+
 ## Training
 
 Smoke train:

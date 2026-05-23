@@ -600,6 +600,10 @@ def run_stage(
                     variable_trace_position_ids,
                     variable_trace_values,
                     variable_trace_mask,
+                    slot_digit_weight=args.slot_digit_weight,
+                    predicted_slot_digit_weight=args.predicted_slot_digit_weight,
+                    slot_digit_carry_weight=args.slot_digit_carry_weight,
+                    predicted_slot_digit_carry_weight=args.predicted_slot_digit_carry_weight,
                 )
             elif name == "standalone_transition":
                 out = model.standalone_transition_loss(
@@ -1026,6 +1030,30 @@ def main() -> None:
     parser.add_argument("--joint-vicreg-weight", type=float, default=0.05)
     parser.add_argument("--joint-token-weight", type=float, default=0.5)
     parser.add_argument("--joint-length-weight", type=float, default=0.1)
+    parser.add_argument(
+        "--slot-digit-weight",
+        type=float,
+        default=1.0,
+        help="Teacher-forced slot-digit result loss weight for latent reasoning.",
+    )
+    parser.add_argument(
+        "--predicted-slot-digit-weight",
+        type=float,
+        default=1.0,
+        help="Predicted-slot digit result loss weight for latent reasoning.",
+    )
+    parser.add_argument(
+        "--slot-digit-carry-weight",
+        type=float,
+        default=0.5,
+        help="Teacher-forced slot-digit carry loss weight for latent reasoning.",
+    )
+    parser.add_argument(
+        "--predicted-slot-digit-carry-weight",
+        type=float,
+        default=0.5,
+        help="Predicted-slot digit carry loss weight for latent reasoning.",
+    )
     parser.add_argument(
         "--stages",
         default="0,1,2",

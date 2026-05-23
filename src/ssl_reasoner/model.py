@@ -2181,6 +2181,10 @@ class LatentReasoningSequence(nn.Module):
         position_ids: torch.Tensor,
         values: torch.Tensor,
         step_mask: torch.Tensor,
+        slot_digit_weight: float = 1.0,
+        predicted_slot_digit_weight: float = 1.0,
+        slot_digit_carry_weight: float = 0.5,
+        predicted_slot_digit_carry_weight: float = 0.5,
     ) -> dict[str, torch.Tensor]:
         all_ops, all_values, all_mask, kind_ids = self._targets(op_ids, values, step_mask)
         target = self.target_encoder(all_ops, all_values, kind_ids).detach()
@@ -2992,10 +2996,10 @@ class LatentReasoningSequence(nn.Module):
             + slot_result_loss
             + slot_transition_result_loss
             + predicted_slot_transition_result_loss
-            + slot_digit_result_value_loss
-            + 0.5 * slot_digit_carry_loss
-            + predicted_slot_digit_result_value_loss
-            + 0.5 * predicted_slot_digit_carry_loss
+            + slot_digit_weight * slot_digit_result_value_loss
+            + slot_digit_carry_weight * slot_digit_carry_loss
+            + predicted_slot_digit_weight * predicted_slot_digit_result_value_loss
+            + predicted_slot_digit_carry_weight * predicted_slot_digit_carry_loss
             + process_value_loss
             + sign_loss
             + digit_loss
@@ -3771,6 +3775,10 @@ class MathJEPAReadout(nn.Module):
         variable_trace_position_ids: torch.Tensor,
         variable_trace_values: torch.Tensor,
         variable_trace_mask: torch.Tensor,
+        slot_digit_weight: float = 1.0,
+        predicted_slot_digit_weight: float = 1.0,
+        slot_digit_carry_weight: float = 0.5,
+        predicted_slot_digit_carry_weight: float = 0.5,
     ) -> dict[str, torch.Tensor]:
         return self.latent_reasoning_sequence.loss(
             math_ids,
@@ -3778,6 +3786,10 @@ class MathJEPAReadout(nn.Module):
             variable_trace_position_ids,
             variable_trace_values,
             variable_trace_mask,
+            slot_digit_weight=slot_digit_weight,
+            predicted_slot_digit_weight=predicted_slot_digit_weight,
+            slot_digit_carry_weight=slot_digit_carry_weight,
+            predicted_slot_digit_carry_weight=predicted_slot_digit_carry_weight,
         )
 
     def standalone_transition_loss(
