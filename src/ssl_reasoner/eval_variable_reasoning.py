@@ -218,6 +218,8 @@ def evaluate_preset(
         or args.latent_reasoning_state_values
         or args.latent_reasoning_slot_values
         or args.latent_reasoning_slot_transition_values
+        or args.latent_reasoning_slot_class_values
+        or args.latent_reasoning_slot_process_values
     ):
         max_math_len = train_args.get("max_math_len", 8)
         all_math_ids = torch.tensor(
@@ -248,6 +250,12 @@ def evaluate_preset(
                     latent_reasoning_slot_values=args.latent_reasoning_slot_values,
                     latent_reasoning_slot_transition_values=(
                         args.latent_reasoning_slot_transition_values
+                    ),
+                    latent_reasoning_slot_class_values=(
+                        args.latent_reasoning_slot_class_values
+                    ),
+                    latent_reasoning_slot_process_values=(
+                        args.latent_reasoning_slot_process_values
                     ),
                 )
             )
@@ -341,6 +349,8 @@ def evaluate_problem(
         latent_reasoning_state_values=args.latent_reasoning_state_values,
         latent_reasoning_slot_values=args.latent_reasoning_slot_values,
         latent_reasoning_slot_transition_values=args.latent_reasoning_slot_transition_values,
+        latent_reasoning_slot_class_values=args.latent_reasoning_slot_class_values,
+        latent_reasoning_slot_process_values=args.latent_reasoning_slot_process_values,
     )
     pred_trace = traces[0]
     final = trace_final_value(pred_trace)
@@ -394,6 +404,8 @@ def main() -> None:
     parser.add_argument("--latent-reasoning-state-values", action="store_true")
     parser.add_argument("--latent-reasoning-slot-values", action="store_true")
     parser.add_argument("--latent-reasoning-slot-transition-values", action="store_true")
+    parser.add_argument("--latent-reasoning-slot-class-values", action="store_true")
+    parser.add_argument("--latent-reasoning-slot-process-values", action="store_true")
     parser.add_argument("--unconstrained", action="store_true")
     args = parser.parse_args()
 

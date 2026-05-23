@@ -2784,6 +2784,28 @@ class LatentReasoningSequence(nn.Module):
             ]
             values = torch.stack([lhs_values, rhs_values, result_values], dim=-1)
             return active, op_ids, values
+        elif value_mode in {"slot_class", "slot_process"}:
+            pre_values, pre_ops = self._pre_state_values_ops(
+                math_ids,
+                state_value_logits,
+                state_op_logits,
+            )
+            lhs_slots = slot_lhs_logits.argmax(dim=-1)
+            rhs_slots = slot_rhs_logits.argmax(dim=-1)
+            op_slots = slot_op_logits.argmax(dim=-1)
+            lhs_values = pre_values.gather(dim=2, index=lhs_slots.unsqueeze(-1)).squeeze(-1)
+            rhs_values = pre_values.gather(dim=2, index=rhs_slots.unsqueeze(-1)).squeeze(-1)
+            op_ids = pre_ops.gather(dim=2, index=op_slots.unsqueeze(-1)).squeeze(-1)
+            result_logits = (
+                process_value_logits[:, :, 2]
+                if value_mode == "slot_process"
+                else value_logits[:, :, 2]
+            )
+            result_values = ReasoningStepTargetEncoder.class_to_value(
+                result_logits.argmax(dim=-1)
+            )
+            values = torch.stack([lhs_values, rhs_values, result_values], dim=-1)
+            return active_logits.sigmoid().ge(0.5), op_ids, values
         elif value_mode == "digit":
             values = self.sign_digits_to_value(
                 sign_logits.argmax(dim=-1),
@@ -4159,6 +4181,8 @@ class MathJEPAReadout(nn.Module):
         latent_reasoning_state_values: bool = False,
         latent_reasoning_slot_values: bool = False,
         latent_reasoning_slot_transition_values: bool = False,
+        latent_reasoning_slot_class_values: bool = False,
+        latent_reasoning_slot_process_values: bool = False,
     ) -> list[str]:
         if (
             latent_reasoning_values
@@ -4167,8 +4191,16 @@ class MathJEPAReadout(nn.Module):
             or latent_reasoning_state_values
             or latent_reasoning_slot_values
             or latent_reasoning_slot_transition_values
+            or latent_reasoning_slot_class_values
+            or latent_reasoning_slot_process_values
         ):
             value_mode = (
+                "slot_process"
+                if latent_reasoning_slot_process_values
+                else
+                "slot_class"
+                if latent_reasoning_slot_class_values
+                else
                 "slot_transition"
                 if latent_reasoning_slot_transition_values
                 else

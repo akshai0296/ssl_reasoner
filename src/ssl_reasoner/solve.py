@@ -76,6 +76,12 @@ def solve_variable_debug(
         latent_reasoning_slot_transition_values=(
             value_mode == "latent_reasoning_slot_transition"
         ),
+        latent_reasoning_slot_class_values=(
+            value_mode == "latent_reasoning_slot_class"
+        ),
+        latent_reasoning_slot_process_values=(
+            value_mode == "latent_reasoning_slot_process"
+        ),
     )
     rows = []
     for problem, trace in zip(problems, traces):
@@ -131,6 +137,8 @@ def main() -> None:
             "latent_reasoning_state",
             "latent_reasoning_slot",
             "latent_reasoning_slot_transition",
+            "latent_reasoning_slot_class",
+            "latent_reasoning_slot_process",
         ],
         default="candidate",
     )

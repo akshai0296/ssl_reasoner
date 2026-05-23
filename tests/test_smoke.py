@@ -732,6 +732,18 @@ def test_latent_reasoning_sequence_loss_and_decode():
             value_mode="slot_transition",
         )
     )
+    slot_class_active, slot_class_ops, slot_class_values = (
+        model.latent_reasoning_sequence.predict_structured(
+            math_ids,
+            value_mode="slot_class",
+        )
+    )
+    slot_process_active, slot_process_ops, slot_process_values = (
+        model.latent_reasoning_sequence.predict_structured(
+            math_ids,
+            value_mode="slot_process",
+        )
+    )
     traces = model.solve_variable_reasoning_texts(math_ids, latent_reasoning_values=True)
     process_traces = model.solve_variable_reasoning_texts(
         math_ids,
@@ -748,6 +760,14 @@ def test_latent_reasoning_sequence_loss_and_decode():
     slot_transition_traces = model.solve_variable_reasoning_texts(
         math_ids,
         latent_reasoning_slot_transition_values=True,
+    )
+    slot_class_traces = model.solve_variable_reasoning_texts(
+        math_ids,
+        latent_reasoning_slot_class_values=True,
+    )
+    slot_process_traces = model.solve_variable_reasoning_texts(
+        math_ids,
+        latent_reasoning_slot_process_values=True,
     )
 
     assert out["loss"].ndim == 0
@@ -792,11 +812,19 @@ def test_latent_reasoning_sequence_loss_and_decode():
     assert slot_transition_active.shape == (4, 17)
     assert slot_transition_ops.shape == (4, 17)
     assert slot_transition_values.shape == (4, 17, 3)
+    assert slot_class_active.shape == (4, 17)
+    assert slot_class_ops.shape == (4, 17)
+    assert slot_class_values.shape == (4, 17, 3)
+    assert slot_process_active.shape == (4, 17)
+    assert slot_process_ops.shape == (4, 17)
+    assert slot_process_values.shape == (4, 17, 3)
     assert len(traces) == 4
     assert len(process_traces) == 4
     assert len(state_traces) == 4
     assert len(slot_traces) == 4
     assert len(slot_transition_traces) == 4
+    assert len(slot_class_traces) == 4
+    assert len(slot_process_traces) == 4
 
 
 def test_variable_reasoner_digit_value_round_trip():

@@ -237,6 +237,16 @@ PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
   --checkpoint checkpoints/latent_reasoning_sequence_process_conditioned_smoke/best.pt \
   --latent-reasoning-process-values \
   --preset in_dist
+
+PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
+  --checkpoint checkpoints/latent_reasoning_sequence_predslot_transition_smoke/best.pt \
+  --latent-reasoning-slot-class-values \
+  --preset in_dist
+
+PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
+  --checkpoint checkpoints/latent_reasoning_sequence_predslot_transition_smoke/best.pt \
+  --latent-reasoning-slot-process-values \
+  --preset in_dist
 ```
 
 ## Current Results
@@ -700,13 +710,33 @@ Public 200-sample eval for
 | `length_8` | `0.005` | `0.000` | `0.000` | `0.000` | `0.025` | `0.000` |
 | `length_16` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` |
 
+Two hybrid inference modes were added to separate the slot-selection problem from the
+result-decoding problem:
+
+| Mode | Operand/source fields | Result source |
+| --- | --- | --- |
+| `--latent-reasoning-slot-class-values` | selected `lhs`, `rhs`, and `op` slots | bounded class value head |
+| `--latent-reasoning-slot-process-values` | selected `lhs`, `rhs`, and `op` slots | process-conditioned value head |
+
+Public 200-sample eval for the same checkpoint:
+
+| Preset | Slot-class answer | Slot-class trace | Slot-process answer | Slot-process trace |
+| --- | ---: | ---: | ---: | ---: |
+| `in_dist` | `0.065` | `0.000` | `0.050` | `0.000` |
+| `larger_numbers` | `0.000` | `0.000` | `0.000` | `0.000` |
+| `longer_expr` | `0.030` | `0.000` | `0.020` | `0.000` |
+| `no_multiply` | `0.095` | `0.000` | `0.060` | `0.000` |
+| `many_multiply` | `0.150` | `0.000` | `0.125` | `0.000` |
+| `length_8` | `0.005` | `0.000` | `0.000` | `0.000` |
+| `length_16` | `0.000` | `0.000` | `0.000` | `0.000` |
+
 Interpretation: training on predicted slot-selected operands makes the slot-transition
-path nonzero externally, but it is still weaker than class/process decoding. The main
-remaining issue is predicted expression-state value quality: the selector can point to
-slots, but the values inside those predicted slots are often wrong. The next improvement
-should either use a hybrid result path from class/process heads after slot selection, or
-train the expression-state value decoder much more strongly before relying on it for
-slot-transition inference.
+path nonzero externally, but it is still weaker than class/process decoding. The hybrid
+paths recover class/process answer accuracy while using slot-selected operands, but they
+do not produce valid full traces. The main remaining issue is predicted expression-state
+value quality: the selector can point to slots, but the values inside those predicted
+slots are often wrong. The next improvement should train the expression-state value
+decoder much more strongly before relying on it for slot-transition inference.
 
 ## Training
 
