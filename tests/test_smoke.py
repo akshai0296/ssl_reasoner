@@ -744,6 +744,12 @@ def test_latent_reasoning_sequence_loss_and_decode():
             value_mode="slot_process",
         )
     )
+    slot_digit_active, slot_digit_ops, slot_digit_values = (
+        model.latent_reasoning_sequence.predict_structured(
+            math_ids,
+            value_mode="slot_digit",
+        )
+    )
     traces = model.solve_variable_reasoning_texts(math_ids, latent_reasoning_values=True)
     process_traces = model.solve_variable_reasoning_texts(
         math_ids,
@@ -769,6 +775,10 @@ def test_latent_reasoning_sequence_loss_and_decode():
         math_ids,
         latent_reasoning_slot_process_values=True,
     )
+    slot_digit_traces = model.solve_variable_reasoning_texts(
+        math_ids,
+        latent_reasoning_slot_digit_values=True,
+    )
 
     assert out["loss"].ndim == 0
     assert out["latent_reasoning_cosine"].ndim == 0
@@ -791,6 +801,14 @@ def test_latent_reasoning_sequence_loss_and_decode():
     assert out["latent_reasoning_slot_transition_final_acc"].ndim == 0
     assert out["latent_reasoning_predicted_slot_transition_result_acc"].ndim == 0
     assert out["latent_reasoning_predicted_slot_transition_final_acc"].ndim == 0
+    assert out["latent_reasoning_slot_digit_result_acc"].ndim == 0
+    assert out["latent_reasoning_slot_digit_final_acc"].ndim == 0
+    assert out["latent_reasoning_slot_digit_carry_acc"].ndim == 0
+    assert out["latent_reasoning_slot_digit_arithmetic_valid_acc"].ndim == 0
+    assert out["latent_reasoning_predicted_slot_digit_result_acc"].ndim == 0
+    assert out["latent_reasoning_predicted_slot_digit_final_acc"].ndim == 0
+    assert out["latent_reasoning_predicted_slot_digit_carry_acc"].ndim == 0
+    assert out["latent_reasoning_predicted_slot_digit_arithmetic_valid_acc"].ndim == 0
     assert out["latent_reasoning_process_digit_acc"].ndim == 0
     assert out["latent_reasoning_process_carry_acc"].ndim == 0
     assert out["latent_reasoning_state_value_acc"].ndim == 0
@@ -821,6 +839,9 @@ def test_latent_reasoning_sequence_loss_and_decode():
     assert slot_process_active.shape == (4, 17)
     assert slot_process_ops.shape == (4, 17)
     assert slot_process_values.shape == (4, 17, 3)
+    assert slot_digit_active.shape == (4, 17)
+    assert slot_digit_ops.shape == (4, 17)
+    assert slot_digit_values.shape == (4, 17, 3)
     assert len(traces) == 4
     assert len(process_traces) == 4
     assert len(state_traces) == 4
@@ -828,6 +849,7 @@ def test_latent_reasoning_sequence_loss_and_decode():
     assert len(slot_transition_traces) == 4
     assert len(slot_class_traces) == 4
     assert len(slot_process_traces) == 4
+    assert len(slot_digit_traces) == 4
 
 
 def test_variable_reasoner_digit_value_round_trip():

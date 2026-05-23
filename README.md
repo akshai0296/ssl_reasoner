@@ -717,6 +717,7 @@ result-decoding problem:
 | --- | --- | --- |
 | `--latent-reasoning-slot-class-values` | selected `lhs`, `rhs`, and `op` slots | bounded class value head |
 | `--latent-reasoning-slot-process-values` | selected `lhs`, `rhs`, and `op` slots | process-conditioned value head |
+| `--latent-reasoning-slot-digit-values` | selected `lhs`, `rhs`, and `op` slots | sign/digit/carry result head |
 
 Public 200-sample eval for the same checkpoint:
 
@@ -780,6 +781,45 @@ slot-transition result accuracy and pre-slot op recovery, but exact decoded stat
 remain far too low. The next architectural bottleneck is numeric state representation:
 the current fixed digit/class heads do not preserve exact intermediate values well enough
 for multi-step latent trace generation.
+
+The factorized slot-digit transition head predicts result sign, result digits, and
+per-place carry/borrow from the selected operands, selected operator, and latent step
+embedding. This keeps the arithmetic path learned, but gives the model a structured
+numeric representation instead of a single bounded integer class. Starting from
+`checkpoints/latent_reasoning_sequence_state_focused_smoke/best.pt` with partial loading
+and training for 1000 steps gives:
+
+| Metric | Step 1 | Step 1000 |
+| --- | ---: | ---: |
+| slot pair accuracy | `0.938` | `0.926` |
+| slot-transition result accuracy | `0.423` | `0.568` |
+| predicted-slot transition result accuracy | `0.245` | `0.292` |
+| slot-digit result accuracy | `0.000` | `0.249` |
+| slot-digit final accuracy | `0.000` | `0.109` |
+| slot-digit carry accuracy | `0.005` | `0.941` |
+| predicted-slot digit result accuracy | `0.000` | `0.150` |
+| predicted-slot digit carry accuracy | `0.004` | `0.897` |
+| predicted-slot digit arithmetic-valid accuracy | `0.000` | `0.210` |
+| state value accuracy | `0.054` | `0.083` |
+
+Public 200-sample eval for
+`checkpoints/latent_reasoning_sequence_slot_digit_smoke/best.pt`:
+
+| Preset | Class answer | Class trace | Slot-transition answer | Slot-transition trace | Slot-digit answer | Slot-digit trace |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `in_dist` | `0.065` | `0.015` | `0.040` | `0.000` | `0.015` | `0.000` |
+| `larger_numbers` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` |
+| `longer_expr` | `0.050` | `0.000` | `0.020` | `0.000` | `0.005` | `0.000` |
+| `no_multiply` | `0.115` | `0.000` | `0.080` | `0.000` | `0.070` | `0.000` |
+| `many_multiply` | `0.135` | `0.085` | `0.070` | `0.000` | `0.040` | `0.000` |
+| `length_8` | `0.005` | `0.000` | `0.005` | `0.000` | `0.005` | `0.000` |
+| `length_16` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` |
+
+Interpretation: the factorized path learns carry/borrow structure quickly and improves
+teacher-forced slot-transition metrics, but the new slot-digit inference mode is not yet
+competitive. Exact result digits are still the limiting factor, so this path needs a
+longer curriculum or staged warmup where digit/carry accuracy is trained before it is
+used as the main inference decoder.
 
 ## Training
 

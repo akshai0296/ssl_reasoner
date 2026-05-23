@@ -1611,6 +1611,17 @@ class LatentReasoningSequence(nn.Module):
             nn.GELU(),
             nn.Linear(d_model * 2, TRANSITION_VALUE_CLASSES),
         )
+        self.slot_digit_result_head = nn.Sequential(
+            nn.LayerNorm(d_model * 4 + 3),
+            nn.Linear(d_model * 4 + 3, d_model * 2),
+            nn.GELU(),
+            nn.Linear(
+                d_model * 2,
+                2
+                + TRANSITION_DIGITS * 10
+                + TRANSITION_DIGITS * LATENT_REASONING_CARRY_CLASSES,
+            ),
+        )
 
     @staticmethod
     def value_to_sign_digits(values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -2119,6 +2130,50 @@ class LatentReasoningSequence(nn.Module):
         )
         return self.slot_transition_result_head(transition_input)
 
+    def _slot_digit_result_logits(
+        self,
+        embeddings: torch.Tensor,
+        lhs_values: torch.Tensor,
+        rhs_values: torch.Tensor,
+        op_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        class_ids_lhs = ReasoningStepTargetEncoder.value_to_class(lhs_values)
+        class_ids_rhs = ReasoningStepTargetEncoder.value_to_class(rhs_values)
+        transition_input = torch.cat(
+            [
+                embeddings,
+                self.slot_transition_value_embed(class_ids_lhs),
+                self.slot_transition_value_embed(class_ids_rhs),
+                self.slot_transition_op_embed(op_ids.clamp(min=0, max=3).long()),
+                torch.stack(
+                    [
+                        lhs_values / 1000.0,
+                        rhs_values / 1000.0,
+                        op_ids.to(torch.float) / 3.0,
+                    ],
+                    dim=-1,
+                ),
+            ],
+            dim=-1,
+        )
+        logits = self.slot_digit_result_head(transition_input)
+        sign_logits = logits[:, :, :2]
+        digit_start = 2
+        digit_end = digit_start + TRANSITION_DIGITS * 10
+        digit_logits = logits[:, :, digit_start:digit_end].view(
+            logits.size(0),
+            logits.size(1),
+            TRANSITION_DIGITS,
+            10,
+        )
+        carry_logits = logits[:, :, digit_end:].view(
+            logits.size(0),
+            logits.size(1),
+            TRANSITION_DIGITS,
+            LATENT_REASONING_CARRY_CLASSES,
+        )
+        return sign_logits, digit_logits, carry_logits
+
     def loss(
         self,
         math_ids: torch.Tensor,
@@ -2242,6 +2297,16 @@ class LatentReasoningSequence(nn.Module):
             all_values[:, :, 1],
             all_ops,
         )
+        (
+            slot_digit_sign_logits,
+            slot_digit_value_logits,
+            slot_digit_carry_logits,
+        ) = self._slot_digit_result_logits(
+            pred,
+            all_values[:, :, 0],
+            all_values[:, :, 1],
+            all_ops,
+        )
         pred_pre_values, pred_pre_ops = self._pre_state_values_ops(
             math_ids,
             state_value_logits,
@@ -2263,6 +2328,16 @@ class LatentReasoningSequence(nn.Module):
             index=pred_op_slots.unsqueeze(-1),
         ).squeeze(-1)
         predicted_slot_transition_result_logits = self._slot_transition_result_logits(
+            pred,
+            pred_slot_lhs_values.detach().float(),
+            pred_slot_rhs_values.detach().float(),
+            pred_slot_op_ids.detach(),
+        )
+        (
+            predicted_slot_digit_sign_logits,
+            predicted_slot_digit_value_logits,
+            predicted_slot_digit_carry_logits,
+        ) = self._slot_digit_result_logits(
             pred,
             pred_slot_lhs_values.detach().float(),
             pred_slot_rhs_values.detach().float(),
@@ -2556,6 +2631,15 @@ class LatentReasoningSequence(nn.Module):
             ],
             dim=1,
         )
+        (
+            slot_process_digit_targets,
+            slot_process_carry_targets,
+            slot_process_mask,
+        ) = self.process_targets(
+            all_ops,
+            all_values,
+            transition_mask,
+        )
         slot_transition_result_loss = F.cross_entropy(
             slot_transition_result_logits.reshape(-1, TRANSITION_VALUE_CLASSES),
             value_targets[:, :, 2].reshape(-1),
@@ -2572,6 +2656,62 @@ class LatentReasoningSequence(nn.Module):
         predicted_slot_transition_result_loss = (
             predicted_slot_transition_result_loss * transition_mask
         ).sum() / transition_mask.sum().clamp(min=1.0)
+        slot_digit_sign_loss = F.cross_entropy(
+            slot_digit_sign_logits.reshape(-1, 2),
+            sign_targets[:, :, 2].reshape(-1),
+            reduction="none",
+        ).view_as(all_mask)
+        slot_digit_value_loss = F.cross_entropy(
+            slot_digit_value_logits.reshape(-1, 10),
+            digit_targets[:, :, 2].reshape(-1),
+            reduction="none",
+        ).view(
+            all_mask.size(0),
+            all_mask.size(1),
+            TRANSITION_DIGITS,
+        )
+        slot_digit_value_loss = slot_digit_value_loss.mean(dim=-1)
+        slot_digit_result_value_loss = (
+            (slot_digit_sign_loss + slot_digit_value_loss) * transition_mask
+        ).sum() / transition_mask.sum().clamp(min=1.0)
+        slot_digit_carry_loss = F.cross_entropy(
+            slot_digit_carry_logits.reshape(-1, LATENT_REASONING_CARRY_CLASSES),
+            slot_process_carry_targets.reshape(-1),
+            reduction="none",
+        ).view_as(slot_process_mask)
+        slot_digit_carry_loss = (
+            slot_digit_carry_loss * slot_process_mask
+        ).sum() / slot_process_mask.sum().clamp(min=1.0)
+        predicted_slot_digit_sign_loss = F.cross_entropy(
+            predicted_slot_digit_sign_logits.reshape(-1, 2),
+            sign_targets[:, :, 2].reshape(-1),
+            reduction="none",
+        ).view_as(all_mask)
+        predicted_slot_digit_value_loss = F.cross_entropy(
+            predicted_slot_digit_value_logits.reshape(-1, 10),
+            digit_targets[:, :, 2].reshape(-1),
+            reduction="none",
+        ).view(
+            all_mask.size(0),
+            all_mask.size(1),
+            TRANSITION_DIGITS,
+        )
+        predicted_slot_digit_value_loss = predicted_slot_digit_value_loss.mean(dim=-1)
+        predicted_slot_digit_result_value_loss = (
+            (predicted_slot_digit_sign_loss + predicted_slot_digit_value_loss)
+            * transition_mask
+        ).sum() / transition_mask.sum().clamp(min=1.0)
+        predicted_slot_digit_carry_loss = F.cross_entropy(
+            predicted_slot_digit_carry_logits.reshape(
+                -1,
+                LATENT_REASONING_CARRY_CLASSES,
+            ),
+            slot_process_carry_targets.reshape(-1),
+            reduction="none",
+        ).view_as(slot_process_mask)
+        predicted_slot_digit_carry_loss = (
+            predicted_slot_digit_carry_loss * slot_process_mask
+        ).sum() / slot_process_mask.sum().clamp(min=1.0)
         process_value_loss = F.cross_entropy(
             process_value_logits.reshape(-1, TRANSITION_VALUE_CLASSES),
             value_targets.reshape(-1),
@@ -2693,6 +2833,79 @@ class LatentReasoningSequence(nn.Module):
         predicted_slot_transition_final_acc = (
             predicted_slot_transition_final_pred == value_targets[:, -1, 2]
         ).float().mean()
+        slot_digit_result_values = self.sign_digits_to_value(
+            slot_digit_sign_logits.argmax(dim=-1),
+            slot_digit_value_logits.argmax(dim=-1),
+        )
+        slot_digit_result_acc = (
+            (slot_digit_result_values == all_values[:, :, 2].round().long()).float()
+            * transition_mask
+        ).sum() / transition_mask.sum().clamp(min=1.0)
+        slot_digit_final_pred = slot_digit_result_values[
+            torch.arange(pred.size(0), device=pred.device),
+            final_step_index,
+        ]
+        slot_digit_final_acc = (
+            slot_digit_final_pred == all_values[:, -1, 2].round().long()
+        ).float().mean()
+        slot_digit_carry_acc = (
+            (slot_digit_carry_logits.argmax(dim=-1) == slot_process_carry_targets).float()
+            * slot_process_mask
+        ).sum() / slot_process_mask.sum().clamp(min=1.0)
+        slot_digit_arithmetic_targets = torch.where(
+            all_ops.eq(1),
+            all_values[:, :, 0] + all_values[:, :, 1],
+            torch.where(
+                all_ops.eq(2),
+                all_values[:, :, 0] - all_values[:, :, 1],
+                all_values[:, :, 0] * all_values[:, :, 1],
+            ),
+        ).round().long()
+        slot_digit_arithmetic_valid_acc = (
+            (slot_digit_result_values == slot_digit_arithmetic_targets).float()
+            * transition_mask
+        ).sum() / transition_mask.sum().clamp(min=1.0)
+        predicted_slot_digit_result_values = self.sign_digits_to_value(
+            predicted_slot_digit_sign_logits.argmax(dim=-1),
+            predicted_slot_digit_value_logits.argmax(dim=-1),
+        )
+        predicted_slot_digit_result_acc = (
+            (
+                predicted_slot_digit_result_values
+                == all_values[:, :, 2].round().long()
+            ).float()
+            * transition_mask
+        ).sum() / transition_mask.sum().clamp(min=1.0)
+        predicted_slot_digit_final_pred = predicted_slot_digit_result_values[
+            torch.arange(pred.size(0), device=pred.device),
+            final_step_index,
+        ]
+        predicted_slot_digit_final_acc = (
+            predicted_slot_digit_final_pred == all_values[:, -1, 2].round().long()
+        ).float().mean()
+        predicted_slot_digit_carry_acc = (
+            (
+                predicted_slot_digit_carry_logits.argmax(dim=-1)
+                == slot_process_carry_targets
+            ).float()
+            * slot_process_mask
+        ).sum() / slot_process_mask.sum().clamp(min=1.0)
+        predicted_slot_digit_arithmetic_targets = torch.where(
+            pred_slot_op_ids.eq(1),
+            pred_slot_lhs_values + pred_slot_rhs_values,
+            torch.where(
+                pred_slot_op_ids.eq(2),
+                pred_slot_lhs_values - pred_slot_rhs_values,
+                pred_slot_lhs_values * pred_slot_rhs_values,
+            ),
+        ).round().long()
+        predicted_slot_digit_arithmetic_valid_acc = (
+            (
+                predicted_slot_digit_result_values
+                == predicted_slot_digit_arithmetic_targets
+            ).float()
+            * transition_mask
+        ).sum() / transition_mask.sum().clamp(min=1.0)
         process_value_acc = (
             (process_value_logits.argmax(dim=-1) == value_targets).float() * value_field_mask
         ).sum() / value_field_mask.sum().clamp(min=1.0)
@@ -2779,6 +2992,10 @@ class LatentReasoningSequence(nn.Module):
             + slot_result_loss
             + slot_transition_result_loss
             + predicted_slot_transition_result_loss
+            + slot_digit_result_value_loss
+            + 0.5 * slot_digit_carry_loss
+            + predicted_slot_digit_result_value_loss
+            + 0.5 * predicted_slot_digit_carry_loss
             + process_value_loss
             + sign_loss
             + digit_loss
@@ -2809,6 +3026,14 @@ class LatentReasoningSequence(nn.Module):
             "latent_reasoning_predicted_slot_transition_result_loss": (
                 predicted_slot_transition_result_loss
             ),
+            "latent_reasoning_slot_digit_result_value_loss": slot_digit_result_value_loss,
+            "latent_reasoning_slot_digit_carry_loss": slot_digit_carry_loss,
+            "latent_reasoning_predicted_slot_digit_result_value_loss": (
+                predicted_slot_digit_result_value_loss
+            ),
+            "latent_reasoning_predicted_slot_digit_carry_loss": (
+                predicted_slot_digit_carry_loss
+            ),
             "latent_reasoning_active_loss": active_loss,
             "latent_reasoning_op_loss": op_loss,
             "latent_reasoning_value_loss": value_loss,
@@ -2834,6 +3059,24 @@ class LatentReasoningSequence(nn.Module):
             ),
             "latent_reasoning_predicted_slot_transition_final_acc": (
                 predicted_slot_transition_final_acc
+            ),
+            "latent_reasoning_slot_digit_result_acc": slot_digit_result_acc,
+            "latent_reasoning_slot_digit_final_acc": slot_digit_final_acc,
+            "latent_reasoning_slot_digit_carry_acc": slot_digit_carry_acc,
+            "latent_reasoning_slot_digit_arithmetic_valid_acc": (
+                slot_digit_arithmetic_valid_acc
+            ),
+            "latent_reasoning_predicted_slot_digit_result_acc": (
+                predicted_slot_digit_result_acc
+            ),
+            "latent_reasoning_predicted_slot_digit_final_acc": (
+                predicted_slot_digit_final_acc
+            ),
+            "latent_reasoning_predicted_slot_digit_carry_acc": (
+                predicted_slot_digit_carry_acc
+            ),
+            "latent_reasoning_predicted_slot_digit_arithmetic_valid_acc": (
+                predicted_slot_digit_arithmetic_valid_acc
             ),
             "latent_reasoning_value_acc": value_acc,
             "latent_reasoning_final_acc": final_acc,
@@ -2946,6 +3189,36 @@ class LatentReasoningSequence(nn.Module):
             )
             result_values = ReasoningStepTargetEncoder.class_to_value(
                 slot_transition_logits.argmax(dim=-1)
+            )
+            active = active_logits.sigmoid().ge(0.5)
+            final_index = active[:, :-1].float().sum(dim=1).long().sub(1).clamp(min=0)
+            result_values[:, -1] = result_values[
+                torch.arange(result_values.size(0), device=result_values.device),
+                final_index,
+            ]
+            values = torch.stack([lhs_values, rhs_values, result_values], dim=-1)
+            return active, op_ids, values
+        elif value_mode == "slot_digit":
+            pre_values, pre_ops = self._pre_state_values_ops(
+                math_ids,
+                state_value_logits,
+                state_op_logits,
+            )
+            lhs_slots = slot_lhs_logits.argmax(dim=-1)
+            rhs_slots = slot_rhs_logits.argmax(dim=-1)
+            op_slots = slot_op_logits.argmax(dim=-1)
+            lhs_values = pre_values.gather(dim=2, index=lhs_slots.unsqueeze(-1)).squeeze(-1)
+            rhs_values = pre_values.gather(dim=2, index=rhs_slots.unsqueeze(-1)).squeeze(-1)
+            op_ids = pre_ops.gather(dim=2, index=op_slots.unsqueeze(-1)).squeeze(-1)
+            sign_logits, digit_logits, _carry_logits = self._slot_digit_result_logits(
+                pred,
+                lhs_values.float(),
+                rhs_values.float(),
+                op_ids,
+            )
+            result_values = self.sign_digits_to_value(
+                sign_logits.argmax(dim=-1),
+                digit_logits.argmax(dim=-1),
             )
             active = active_logits.sigmoid().ge(0.5)
             final_index = active[:, :-1].float().sum(dim=1).long().sub(1).clamp(min=0)
@@ -4354,6 +4627,7 @@ class MathJEPAReadout(nn.Module):
         latent_reasoning_slot_transition_values: bool = False,
         latent_reasoning_slot_class_values: bool = False,
         latent_reasoning_slot_process_values: bool = False,
+        latent_reasoning_slot_digit_values: bool = False,
     ) -> list[str]:
         if (
             latent_reasoning_values
@@ -4364,8 +4638,12 @@ class MathJEPAReadout(nn.Module):
             or latent_reasoning_slot_transition_values
             or latent_reasoning_slot_class_values
             or latent_reasoning_slot_process_values
+            or latent_reasoning_slot_digit_values
         ):
             value_mode = (
+                "slot_digit"
+                if latent_reasoning_slot_digit_values
+                else
                 "slot_process"
                 if latent_reasoning_slot_process_values
                 else
