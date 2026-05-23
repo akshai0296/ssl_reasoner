@@ -769,6 +769,8 @@ def run_stage(
                         "latent_reasoning_slot_pair_acc",
                         "latent_reasoning_slot_result_acc",
                         "latent_reasoning_slot_final_acc",
+                        "latent_reasoning_slot_transition_result_acc",
+                        "latent_reasoning_slot_transition_final_acc",
                         "latent_reasoning_digit_value_acc",
                         "latent_reasoning_digit_final_acc",
                         "latent_reasoning_process_value_acc",
@@ -859,24 +861,33 @@ def run_stage(
                             torch.maximum(
                                 torch.maximum(
                                     torch.maximum(
-                                        out.get("latent_reasoning_final_acc", torch.tensor(0.0)),
+                                        torch.maximum(
+                                            out.get(
+                                                "latent_reasoning_final_acc",
+                                                torch.tensor(0.0),
+                                            ),
+                                            out.get(
+                                                "latent_reasoning_digit_final_acc",
+                                                torch.tensor(0.0),
+                                            ),
+                                        ),
                                         out.get(
-                                            "latent_reasoning_digit_final_acc",
+                                            "latent_reasoning_process_final_acc",
                                             torch.tensor(0.0),
                                         ),
                                     ),
                                     out.get(
-                                        "latent_reasoning_process_final_acc",
+                                        "latent_reasoning_state_conditioned_final_acc",
                                         torch.tensor(0.0),
                                     ),
                                 ),
                                 out.get(
-                                    "latent_reasoning_state_conditioned_final_acc",
+                                    "latent_reasoning_slot_final_acc",
                                     torch.tensor(0.0),
                                 ),
                             ),
                             out.get(
-                                "latent_reasoning_slot_final_acc",
+                                "latent_reasoning_slot_transition_final_acc",
                                 torch.tensor(0.0),
                             ),
                         ).item()

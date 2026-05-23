@@ -1603,6 +1603,14 @@ class LatentReasoningSequence(nn.Module):
             nn.GELU(),
             nn.Linear(d_model * 2, TRANSITION_VALUE_CLASSES),
         )
+        self.slot_transition_value_embed = nn.Embedding(TRANSITION_VALUE_CLASSES, d_model)
+        self.slot_transition_op_embed = nn.Embedding(4, d_model)
+        self.slot_transition_result_head = nn.Sequential(
+            nn.LayerNorm(d_model * 4 + 3),
+            nn.Linear(d_model * 4 + 3, d_model * 2),
+            nn.GELU(),
+            nn.Linear(d_model * 2, TRANSITION_VALUE_CLASSES),
+        )
 
     @staticmethod
     def value_to_sign_digits(values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -2078,6 +2086,39 @@ class LatentReasoningSequence(nn.Module):
         result_logits = self.slot_result_head(slot_input)
         return lhs_slot_logits, rhs_slot_logits, op_slot_logits, result_logits
 
+    def _slot_transition_result_logits(
+        self,
+        embeddings: torch.Tensor,
+        lhs_values: torch.Tensor,
+        rhs_values: torch.Tensor,
+        op_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        lhs = lhs_values.round()
+        rhs = rhs_values.round()
+        features = torch.stack(
+            [
+                lhs / 1000.0,
+                rhs / 1000.0,
+                op_ids.float() / 3.0,
+            ],
+            dim=-1,
+        )
+        transition_input = torch.cat(
+            [
+                embeddings,
+                self.slot_transition_value_embed(
+                    ReasoningStepTargetEncoder.value_to_class(lhs)
+                ),
+                self.slot_transition_value_embed(
+                    ReasoningStepTargetEncoder.value_to_class(rhs)
+                ),
+                self.slot_transition_op_embed(op_ids.clamp(min=0, max=3).long()),
+                features,
+            ],
+            dim=-1,
+        )
+        return self.slot_transition_result_head(transition_input)
+
     def loss(
         self,
         math_ids: torch.Tensor,
@@ -2194,6 +2235,12 @@ class LatentReasoningSequence(nn.Module):
                 state_op_logits,
                 state_op_active_logits,
             )
+        )
+        slot_transition_result_logits = self._slot_transition_result_logits(
+            pred,
+            all_values[:, :, 0],
+            all_values[:, :, 1],
+            all_ops,
         )
         state_values, state_value_mask, state_ops, state_op_mask = (
             self.expression_state_targets(
@@ -2338,6 +2385,21 @@ class LatentReasoningSequence(nn.Module):
         slot_result_loss = (
             slot_result_loss * all_mask
         ).sum() / all_mask.sum().clamp(min=1.0)
+        transition_mask = torch.cat(
+            [
+                step_mask[:, : self.max_steps],
+                step_mask.new_zeros(step_mask.size(0), 1),
+            ],
+            dim=1,
+        )
+        slot_transition_result_loss = F.cross_entropy(
+            slot_transition_result_logits.reshape(-1, TRANSITION_VALUE_CLASSES),
+            value_targets[:, :, 2].reshape(-1),
+            reduction="none",
+        ).view_as(all_mask)
+        slot_transition_result_loss = (
+            slot_transition_result_loss * transition_mask
+        ).sum() / transition_mask.sum().clamp(min=1.0)
         process_value_loss = F.cross_entropy(
             process_value_logits.reshape(-1, TRANSITION_VALUE_CLASSES),
             value_targets.reshape(-1),
@@ -2433,6 +2495,18 @@ class LatentReasoningSequence(nn.Module):
         slot_final_acc = (
             slot_result_logits[:, -1].argmax(dim=-1) == value_targets[:, -1, 2]
         ).float().mean()
+        slot_transition_result_acc = (
+            (slot_transition_result_logits.argmax(dim=-1) == value_targets[:, :, 2]).float()
+            * transition_mask
+        ).sum() / transition_mask.sum().clamp(min=1.0)
+        final_step_index = step_mask.sum(dim=1).long().sub(1).clamp(min=0)
+        slot_transition_final_pred = slot_transition_result_logits[
+            torch.arange(pred.size(0), device=pred.device),
+            final_step_index,
+        ].argmax(dim=-1)
+        slot_transition_final_acc = (
+            slot_transition_final_pred == value_targets[:, -1, 2]
+        ).float().mean()
         process_value_acc = (
             (process_value_logits.argmax(dim=-1) == value_targets).float() * value_field_mask
         ).sum() / value_field_mask.sum().clamp(min=1.0)
@@ -2490,6 +2564,7 @@ class LatentReasoningSequence(nn.Module):
             + value_loss
             + state_conditioned_value_loss
             + slot_result_loss
+            + slot_transition_result_loss
             + process_value_loss
             + sign_loss
             + digit_loss
@@ -2513,6 +2588,7 @@ class LatentReasoningSequence(nn.Module):
             "latent_reasoning_slot_rhs_loss": slot_rhs_loss,
             "latent_reasoning_slot_op_loss": slot_op_loss,
             "latent_reasoning_slot_result_loss": slot_result_loss,
+            "latent_reasoning_slot_transition_result_loss": slot_transition_result_loss,
             "latent_reasoning_active_loss": active_loss,
             "latent_reasoning_op_loss": op_loss,
             "latent_reasoning_value_loss": value_loss,
@@ -2531,6 +2607,8 @@ class LatentReasoningSequence(nn.Module):
             "latent_reasoning_slot_pair_acc": slot_pair_acc,
             "latent_reasoning_slot_result_acc": slot_result_acc,
             "latent_reasoning_slot_final_acc": slot_final_acc,
+            "latent_reasoning_slot_transition_result_acc": slot_transition_result_acc,
+            "latent_reasoning_slot_transition_final_acc": slot_transition_final_acc,
             "latent_reasoning_value_acc": value_acc,
             "latent_reasoning_final_acc": final_acc,
             "latent_reasoning_state_conditioned_value_acc": state_conditioned_value_acc,
@@ -2619,6 +2697,35 @@ class LatentReasoningSequence(nn.Module):
             values = torch.stack([lhs_values, rhs_values, result_values], dim=-1)
             op_ids = pre_ops.gather(dim=2, index=op_slots.unsqueeze(-1)).squeeze(-1)
             return active_logits.sigmoid().ge(0.5), op_ids, values
+        elif value_mode == "slot_transition":
+            pre_values, pre_ops = self._pre_state_values_ops(
+                math_ids,
+                state_value_logits,
+                state_op_logits,
+            )
+            lhs_slots = slot_lhs_logits.argmax(dim=-1)
+            rhs_slots = slot_rhs_logits.argmax(dim=-1)
+            op_slots = slot_op_logits.argmax(dim=-1)
+            lhs_values = pre_values.gather(dim=2, index=lhs_slots.unsqueeze(-1)).squeeze(-1)
+            rhs_values = pre_values.gather(dim=2, index=rhs_slots.unsqueeze(-1)).squeeze(-1)
+            op_ids = pre_ops.gather(dim=2, index=op_slots.unsqueeze(-1)).squeeze(-1)
+            slot_transition_logits = self._slot_transition_result_logits(
+                pred,
+                lhs_values.float(),
+                rhs_values.float(),
+                op_ids,
+            )
+            result_values = ReasoningStepTargetEncoder.class_to_value(
+                slot_transition_logits.argmax(dim=-1)
+            )
+            active = active_logits.sigmoid().ge(0.5)
+            final_index = active[:, :-1].float().sum(dim=1).long().sub(1).clamp(min=0)
+            result_values[:, -1] = result_values[
+                torch.arange(result_values.size(0), device=result_values.device),
+                final_index,
+            ]
+            values = torch.stack([lhs_values, rhs_values, result_values], dim=-1)
+            return active, op_ids, values
         elif value_mode == "digit":
             values = self.sign_digits_to_value(
                 sign_logits.argmax(dim=-1),
@@ -3993,6 +4100,7 @@ class MathJEPAReadout(nn.Module):
         latent_reasoning_process_values: bool = False,
         latent_reasoning_state_values: bool = False,
         latent_reasoning_slot_values: bool = False,
+        latent_reasoning_slot_transition_values: bool = False,
     ) -> list[str]:
         if (
             latent_reasoning_values
@@ -4000,8 +4108,12 @@ class MathJEPAReadout(nn.Module):
             or latent_reasoning_process_values
             or latent_reasoning_state_values
             or latent_reasoning_slot_values
+            or latent_reasoning_slot_transition_values
         ):
             value_mode = (
+                "slot_transition"
+                if latent_reasoning_slot_transition_values
+                else
                 "slot"
                 if latent_reasoning_slot_values
                 else

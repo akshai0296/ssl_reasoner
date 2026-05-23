@@ -630,6 +630,46 @@ because result decoding from the selected slots is weak. This isolates the next
 bottleneck: keep the slot selector, but replace the free slot result head with a
 selected-operand arithmetic transition head.
 
+The selected-operand transition head replaces the free slot result head with a learned
+result predictor conditioned on the selected `lhs`, selected `rhs`, selected `op`, and
+the latent step embedding. This is still a neural prediction path, but it gives the
+result module direct access to the operands instead of asking it to infer the result
+from an unconstrained latent state. Starting from
+`checkpoints/latent_reasoning_sequence_slot_smoke/best.pt` with partial loading and
+training for 1000 steps gives:
+
+| Metric | Step 1 | Step 1000 |
+| --- | ---: | ---: |
+| slot pair accuracy | `0.876` | `0.907` |
+| free slot result accuracy | `0.115` | `0.184` |
+| free slot final accuracy | `0.141` | `0.141` |
+| transition result accuracy | `0.002` | `0.452` |
+| transition final accuracy | `0.000` | `0.328` |
+| class final accuracy | `0.359` | `0.406` |
+| process final accuracy | `0.453` | `0.438` |
+
+Public 200-sample eval for
+`checkpoints/latent_reasoning_sequence_slot_transition_smoke/best.pt`:
+
+| Preset | Class answer | Class trace | Slot answer | Slot trace | Slot-transition answer | Slot-transition trace |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `in_dist` | `0.040` | `0.005` | `0.020` | `0.000` | `0.000` | `0.000` |
+| `larger_numbers` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` |
+| `longer_expr` | `0.010` | `0.000` | `0.010` | `0.000` | `0.000` | `0.000` |
+| `no_multiply` | `0.075` | `0.000` | `0.050` | `0.000` | `0.000` | `0.000` |
+| `many_multiply` | `0.120` | `0.075` | `0.050` | `0.000` | `0.000` | `0.000` |
+| `length_8` | `0.000` | `0.000` | `0.010` | `0.000` | `0.000` | `0.000` |
+| `length_16` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` |
+
+Interpretation: the selected-operand transition head fixes the teacher-forced result
+bottleneck internally: transition result accuracy improves from about `0.19` to `0.45`.
+However, the standalone slot-transition inference path is still unusable because it
+depends on predicted state values and predicted slot choices at every step. The next
+fix is to train the transition head under its actual inference distribution: feed it
+detached predicted slot-selected operands during training, or add a hybrid fallback that
+uses the slot selector for operands and the stronger class/process result head for the
+result.
+
 ## Training
 
 Smoke train:
