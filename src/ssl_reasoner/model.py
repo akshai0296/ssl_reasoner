@@ -2242,6 +2242,32 @@ class LatentReasoningSequence(nn.Module):
             all_values[:, :, 1],
             all_ops,
         )
+        pred_pre_values, pred_pre_ops = self._pre_state_values_ops(
+            math_ids,
+            state_value_logits,
+            state_op_logits,
+        )
+        pred_lhs_slots = slot_lhs_logits.detach().argmax(dim=-1)
+        pred_rhs_slots = slot_rhs_logits.detach().argmax(dim=-1)
+        pred_op_slots = slot_op_logits.detach().argmax(dim=-1)
+        pred_slot_lhs_values = pred_pre_values.gather(
+            dim=2,
+            index=pred_lhs_slots.unsqueeze(-1),
+        ).squeeze(-1)
+        pred_slot_rhs_values = pred_pre_values.gather(
+            dim=2,
+            index=pred_rhs_slots.unsqueeze(-1),
+        ).squeeze(-1)
+        pred_slot_op_ids = pred_pre_ops.gather(
+            dim=2,
+            index=pred_op_slots.unsqueeze(-1),
+        ).squeeze(-1)
+        predicted_slot_transition_result_logits = self._slot_transition_result_logits(
+            pred,
+            pred_slot_lhs_values.detach().float(),
+            pred_slot_rhs_values.detach().float(),
+            pred_slot_op_ids.detach(),
+        )
         state_values, state_value_mask, state_ops, state_op_mask = (
             self.expression_state_targets(
                 math_ids,
@@ -2400,6 +2426,14 @@ class LatentReasoningSequence(nn.Module):
         slot_transition_result_loss = (
             slot_transition_result_loss * transition_mask
         ).sum() / transition_mask.sum().clamp(min=1.0)
+        predicted_slot_transition_result_loss = F.cross_entropy(
+            predicted_slot_transition_result_logits.reshape(-1, TRANSITION_VALUE_CLASSES),
+            value_targets[:, :, 2].reshape(-1),
+            reduction="none",
+        ).view_as(all_mask)
+        predicted_slot_transition_result_loss = (
+            predicted_slot_transition_result_loss * transition_mask
+        ).sum() / transition_mask.sum().clamp(min=1.0)
         process_value_loss = F.cross_entropy(
             process_value_logits.reshape(-1, TRANSITION_VALUE_CLASSES),
             value_targets.reshape(-1),
@@ -2507,6 +2541,20 @@ class LatentReasoningSequence(nn.Module):
         slot_transition_final_acc = (
             slot_transition_final_pred == value_targets[:, -1, 2]
         ).float().mean()
+        predicted_slot_transition_result_acc = (
+            (
+                predicted_slot_transition_result_logits.argmax(dim=-1)
+                == value_targets[:, :, 2]
+            ).float()
+            * transition_mask
+        ).sum() / transition_mask.sum().clamp(min=1.0)
+        predicted_slot_transition_final_pred = predicted_slot_transition_result_logits[
+            torch.arange(pred.size(0), device=pred.device),
+            final_step_index,
+        ].argmax(dim=-1)
+        predicted_slot_transition_final_acc = (
+            predicted_slot_transition_final_pred == value_targets[:, -1, 2]
+        ).float().mean()
         process_value_acc = (
             (process_value_logits.argmax(dim=-1) == value_targets).float() * value_field_mask
         ).sum() / value_field_mask.sum().clamp(min=1.0)
@@ -2565,6 +2613,7 @@ class LatentReasoningSequence(nn.Module):
             + state_conditioned_value_loss
             + slot_result_loss
             + slot_transition_result_loss
+            + predicted_slot_transition_result_loss
             + process_value_loss
             + sign_loss
             + digit_loss
@@ -2589,6 +2638,9 @@ class LatentReasoningSequence(nn.Module):
             "latent_reasoning_slot_op_loss": slot_op_loss,
             "latent_reasoning_slot_result_loss": slot_result_loss,
             "latent_reasoning_slot_transition_result_loss": slot_transition_result_loss,
+            "latent_reasoning_predicted_slot_transition_result_loss": (
+                predicted_slot_transition_result_loss
+            ),
             "latent_reasoning_active_loss": active_loss,
             "latent_reasoning_op_loss": op_loss,
             "latent_reasoning_value_loss": value_loss,
@@ -2609,6 +2661,12 @@ class LatentReasoningSequence(nn.Module):
             "latent_reasoning_slot_final_acc": slot_final_acc,
             "latent_reasoning_slot_transition_result_acc": slot_transition_result_acc,
             "latent_reasoning_slot_transition_final_acc": slot_transition_final_acc,
+            "latent_reasoning_predicted_slot_transition_result_acc": (
+                predicted_slot_transition_result_acc
+            ),
+            "latent_reasoning_predicted_slot_transition_final_acc": (
+                predicted_slot_transition_final_acc
+            ),
             "latent_reasoning_value_acc": value_acc,
             "latent_reasoning_final_acc": final_acc,
             "latent_reasoning_state_conditioned_value_acc": state_conditioned_value_acc,

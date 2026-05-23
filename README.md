@@ -670,6 +670,44 @@ detached predicted slot-selected operands during training, or add a hybrid fallb
 uses the slot selector for operands and the stronger class/process result head for the
 result.
 
+The predicted-slot transition objective adds that inference-like training signal. In
+addition to the teacher-forced transition loss above, it feeds detached predicted
+slot-selected `lhs`, `rhs`, and `op` into the same transition head and trains it toward
+the true result. Starting from
+`checkpoints/latent_reasoning_sequence_slot_transition_smoke/best.pt` and training for
+1000 more steps gives:
+
+| Metric | Step 1 | Step 1000 |
+| --- | ---: | ---: |
+| slot pair accuracy | `0.840` | `0.920` |
+| teacher-forced transition result accuracy | `0.004` | `0.339` |
+| teacher-forced transition final accuracy | `0.000` | `0.188` |
+| predicted-slot transition result accuracy | `0.000` | `0.196` |
+| predicted-slot transition final accuracy | `0.000` | `0.156` |
+| class final accuracy | `0.375` | `0.438` |
+| process final accuracy | `0.328` | `0.484` |
+
+Public 200-sample eval for
+`checkpoints/latent_reasoning_sequence_predslot_transition_smoke/best.pt`:
+
+| Preset | Class answer | Class trace | Process answer | Process trace | Slot-transition answer | Slot-transition trace |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `in_dist` | `0.065` | `0.015` | `0.050` | `0.015` | `0.030` | `0.000` |
+| `larger_numbers` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` |
+| `longer_expr` | `0.030` | `0.000` | `0.020` | `0.000` | `0.000` | `0.000` |
+| `no_multiply` | `0.095` | `0.000` | `0.060` | `0.000` | `0.045` | `0.000` |
+| `many_multiply` | `0.150` | `0.090` | `0.125` | `0.080` | `0.060` | `0.000` |
+| `length_8` | `0.005` | `0.000` | `0.000` | `0.000` | `0.025` | `0.000` |
+| `length_16` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` | `0.000` |
+
+Interpretation: training on predicted slot-selected operands makes the slot-transition
+path nonzero externally, but it is still weaker than class/process decoding. The main
+remaining issue is predicted expression-state value quality: the selector can point to
+slots, but the values inside those predicted slots are often wrong. The next improvement
+should either use a hybrid result path from class/process heads after slot selection, or
+train the expression-state value decoder much more strongly before relying on it for
+slot-transition inference.
+
 ## Training
 
 Smoke train:

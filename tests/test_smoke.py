@@ -769,6 +769,8 @@ def test_latent_reasoning_sequence_loss_and_decode():
     assert out["latent_reasoning_slot_final_acc"].ndim == 0
     assert out["latent_reasoning_slot_transition_result_acc"].ndim == 0
     assert out["latent_reasoning_slot_transition_final_acc"].ndim == 0
+    assert out["latent_reasoning_predicted_slot_transition_result_acc"].ndim == 0
+    assert out["latent_reasoning_predicted_slot_transition_final_acc"].ndim == 0
     assert out["latent_reasoning_process_digit_acc"].ndim == 0
     assert out["latent_reasoning_process_carry_acc"].ndim == 0
     assert out["latent_reasoning_state_value_acc"].ndim == 0
