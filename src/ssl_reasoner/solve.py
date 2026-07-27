@@ -85,6 +85,9 @@ def solve_variable_debug(
         latent_reasoning_slot_digit_values=(
             value_mode == "latent_reasoning_slot_digit"
         ),
+        latent_reasoning_copy_update_values=(
+            value_mode == "latent_reasoning_copy_update"
+        ),
     )
     rows = []
     for problem, trace in zip(problems, traces):
@@ -143,6 +146,7 @@ def main() -> None:
             "latent_reasoning_slot_class",
             "latent_reasoning_slot_process",
             "latent_reasoning_slot_digit",
+            "latent_reasoning_copy_update",
         ],
         default="candidate",
     )

@@ -2248,6 +2248,10 @@ class LatentReasoningSequence(nn.Module):
         predicted_slot_digit_weight: float = 1.0,
         slot_digit_carry_weight: float = 0.5,
         predicted_slot_digit_carry_weight: float = 0.5,
+        copy_update_state_weight: float = 1.0,
+        copy_update_slot_weight: float = 1.0,
+        copy_update_result_weight: float = 1.0,
+        copy_update_predicted_result_weight: float = 1.0,
     ) -> dict[str, torch.Tensor]:
         all_ops, all_values, all_mask, kind_ids = self._targets(op_ids, values, step_mask)
         target = self.target_encoder(all_ops, all_values, kind_ids).detach()
@@ -3147,24 +3151,24 @@ class LatentReasoningSequence(nn.Module):
             latent_loss
             + 0.2 * contrastive_loss
             + 0.5 * hard_loss
-            + 2.0 * state_value_loss
+            + (2.0 * copy_update_state_weight) * state_value_loss
             + 1.5 * state_value_active_loss
-            + 1.5 * state_op_loss
+            + (1.5 * copy_update_state_weight) * state_op_loss
             + 1.5 * state_op_active_loss
-            + 2.0 * result_state_value_loss
-            + 2.0 * pre_slot_operand_value_loss
-            + pre_slot_op_loss
+            + (2.0 * copy_update_state_weight) * result_state_value_loss
+            + (2.0 * copy_update_state_weight) * pre_slot_operand_value_loss
+            + copy_update_state_weight * pre_slot_op_loss
             + active_loss
             + op_loss
             + state_conditioned_op_loss
-            + slot_lhs_loss
-            + slot_rhs_loss
-            + slot_op_loss
+            + copy_update_slot_weight * slot_lhs_loss
+            + copy_update_slot_weight * slot_rhs_loss
+            + copy_update_slot_weight * slot_op_loss
             + value_loss
             + state_conditioned_value_loss
-            + slot_result_loss
-            + slot_transition_result_loss
-            + predicted_slot_transition_result_loss
+            + copy_update_result_weight * slot_result_loss
+            + copy_update_result_weight * slot_transition_result_loss
+            + copy_update_predicted_result_weight * predicted_slot_transition_result_loss
             + slot_digit_weight * slot_digit_result_value_loss
             + slot_digit_carry_weight * slot_digit_carry_loss
             + predicted_slot_digit_weight * predicted_slot_digit_result_value_loss
@@ -3387,6 +3391,113 @@ class LatentReasoningSequence(nn.Module):
             ]
             values = torch.stack([lhs_values, rhs_values, result_values], dim=-1)
             return active, op_ids, values
+        elif value_mode == "copy_update":
+            (
+                current_values,
+                current_value_mask,
+                current_ops,
+                current_op_mask,
+            ) = self.initial_expression_state(math_ids, self.max_steps)
+            current_values = current_values.round().long()
+            output_values = current_values.new_zeros(
+                current_values.size(0),
+                self.max_steps + 1,
+                3,
+            )
+            output_ops = current_ops.new_zeros(
+                current_ops.size(0),
+                self.max_steps + 1,
+            )
+            active = active_logits.sigmoid().ge(0.5)
+            for step_idx in range(self.max_steps):
+                value_valid = current_value_mask.bool()
+                op_valid = current_op_mask.bool()
+                lhs_step_logits = slot_lhs_logits[:, step_idx].masked_fill(
+                    ~value_valid,
+                    torch.finfo(slot_lhs_logits.dtype).min,
+                )
+                rhs_step_logits = slot_rhs_logits[:, step_idx].masked_fill(
+                    ~value_valid,
+                    torch.finfo(slot_rhs_logits.dtype).min,
+                )
+                op_step_logits = slot_op_logits[:, step_idx].masked_fill(
+                    ~op_valid,
+                    torch.finfo(slot_op_logits.dtype).min,
+                )
+                lhs_slots = lhs_step_logits.argmax(dim=-1)
+                rhs_slots = rhs_step_logits.argmax(dim=-1)
+                op_slots = op_step_logits.argmax(dim=-1)
+                lhs_values = current_values.gather(
+                    dim=1,
+                    index=lhs_slots.unsqueeze(-1),
+                ).squeeze(-1)
+                rhs_values = current_values.gather(
+                    dim=1,
+                    index=rhs_slots.unsqueeze(-1),
+                ).squeeze(-1)
+                op_ids = current_ops.gather(
+                    dim=1,
+                    index=op_slots.unsqueeze(-1),
+                ).squeeze(-1)
+                step_result_logits = self._slot_transition_result_logits(
+                    pred[:, step_idx : step_idx + 1],
+                    lhs_values.unsqueeze(1).float(),
+                    rhs_values.unsqueeze(1).float(),
+                    op_ids.unsqueeze(1),
+                ).squeeze(1)
+                result_values = ReasoningStepTargetEncoder.class_to_value(
+                    step_result_logits.argmax(dim=-1)
+                )
+                step_active = active[:, step_idx] & current_op_mask.any(dim=1)
+                output_values[:, step_idx, 0] = lhs_values
+                output_values[:, step_idx, 1] = rhs_values
+                output_values[:, step_idx, 2] = result_values
+                output_ops[:, step_idx] = op_ids
+                for row_idx in range(current_values.size(0)):
+                    if not bool(step_active[row_idx].item()):
+                        continue
+                    value_count = int(current_value_mask[row_idx].sum().item())
+                    op_count = int(current_op_mask[row_idx].sum().item())
+                    lhs_idx = int(lhs_slots[row_idx].item())
+                    rhs_idx = int(rhs_slots[row_idx].item())
+                    op_idx = int(op_slots[row_idx].item())
+                    if (
+                        value_count <= 1
+                        or op_count <= 0
+                        or lhs_idx < 0
+                        or rhs_idx <= lhs_idx
+                        or lhs_idx >= value_count
+                        or rhs_idx >= value_count
+                        or op_idx < 0
+                        or op_idx >= op_count
+                    ):
+                        continue
+                    updated_values = torch.cat(
+                        [
+                            current_values[row_idx, :lhs_idx],
+                            result_values[row_idx].reshape(1).to(current_values.dtype),
+                            current_values[row_idx, rhs_idx + 1 : value_count],
+                        ],
+                        dim=0,
+                    )[: self.max_steps + 1]
+                    updated_ops = torch.cat(
+                        [
+                            current_ops[row_idx, :op_idx],
+                            current_ops[row_idx, op_idx + 1 : op_count],
+                        ],
+                        dim=0,
+                    )[: self.max_steps]
+                    current_values[row_idx].zero_()
+                    current_value_mask[row_idx].zero_()
+                    current_ops[row_idx].zero_()
+                    current_op_mask[row_idx].zero_()
+                    current_values[row_idx, : updated_values.numel()] = updated_values
+                    current_value_mask[row_idx, : updated_values.numel()] = 1.0
+                    if updated_ops.numel():
+                        current_ops[row_idx, : updated_ops.numel()] = updated_ops
+                        current_op_mask[row_idx, : updated_ops.numel()] = 1.0
+            output_values[:, -1, 2] = current_values[:, 0]
+            return active, output_ops, output_values
         elif value_mode == "slot_digit":
             pre_values, pre_ops = self._pre_state_values_ops(
                 math_ids,
@@ -3964,6 +4075,10 @@ class MathJEPAReadout(nn.Module):
         predicted_slot_digit_weight: float = 1.0,
         slot_digit_carry_weight: float = 0.5,
         predicted_slot_digit_carry_weight: float = 0.5,
+        copy_update_state_weight: float = 1.0,
+        copy_update_slot_weight: float = 1.0,
+        copy_update_result_weight: float = 1.0,
+        copy_update_predicted_result_weight: float = 1.0,
     ) -> dict[str, torch.Tensor]:
         return self.latent_reasoning_sequence.loss(
             math_ids,
@@ -3975,6 +4090,10 @@ class MathJEPAReadout(nn.Module):
             predicted_slot_digit_weight=predicted_slot_digit_weight,
             slot_digit_carry_weight=slot_digit_carry_weight,
             predicted_slot_digit_carry_weight=predicted_slot_digit_carry_weight,
+            copy_update_state_weight=copy_update_state_weight,
+            copy_update_slot_weight=copy_update_slot_weight,
+            copy_update_result_weight=copy_update_result_weight,
+            copy_update_predicted_result_weight=copy_update_predicted_result_weight,
         )
 
     def standalone_transition_loss(
@@ -4825,6 +4944,7 @@ class MathJEPAReadout(nn.Module):
         latent_reasoning_slot_class_values: bool = False,
         latent_reasoning_slot_process_values: bool = False,
         latent_reasoning_slot_digit_values: bool = False,
+        latent_reasoning_copy_update_values: bool = False,
     ) -> list[str]:
         if (
             latent_reasoning_values
@@ -4836,8 +4956,12 @@ class MathJEPAReadout(nn.Module):
             or latent_reasoning_slot_class_values
             or latent_reasoning_slot_process_values
             or latent_reasoning_slot_digit_values
+            or latent_reasoning_copy_update_values
         ):
             value_mode = (
+                "copy_update"
+                if latent_reasoning_copy_update_values
+                else
                 "slot_digit"
                 if latent_reasoning_slot_digit_values
                 else

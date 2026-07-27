@@ -17,7 +17,11 @@ from ssl_reasoner.data import (
     safe_eval_expression,
 )
 from ssl_reasoner.diagnostics import latent_health
-from ssl_reasoner.eval_variable_reasoning import trace_final_value, trace_is_equivalent
+from ssl_reasoner.eval_variable_reasoning import (
+    trace_final_value,
+    trace_is_equivalent,
+    trace_rollout_metrics,
+)
 from ssl_reasoner.model import LatentVerifier, MathJEPAReadout
 from ssl_reasoner.solver import solve_problem_texts, trace_final_value_index
 from ssl_reasoner.tokenizer import build_math_tokenizer
@@ -208,6 +212,22 @@ def test_variable_trace_equivalence_accepts_valid_alternate_orders():
     )
     assert trace_final_value("3*4=12,2+12=14,14-1=13,13") == 13
     assert trace_final_value("") is None
+
+
+def test_trace_rollout_metrics_break_down_copy_update_errors():
+    good = trace_rollout_metrics("2+3*4-1", "3*4=12,2+12=14,14-1=13,13")
+    assert good["steps"] == 3
+    assert good["lhs"] == 3
+    assert good["rhs"] == 3
+    assert good["op"] == 3
+    assert good["result"] == 3
+    assert good["post_state"] == 3
+
+    bad_result = trace_rollout_metrics("2+3*4-1", "3*4=11,2+11=13,13-1=12,12")
+    assert bad_result["slot_triple"] == 1
+    assert bad_result["result"] == 0
+    assert bad_result["arithmetic_valid"] == 2
+    assert bad_result["post_state"] == 0
 
 
 def test_multi_step_balanced_curriculum_includes_ood_variants():
@@ -750,6 +770,12 @@ def test_latent_reasoning_sequence_loss_and_decode():
             value_mode="slot_digit",
         )
     )
+    copy_update_active, copy_update_ops, copy_update_values = (
+        model.latent_reasoning_sequence.predict_structured(
+            math_ids,
+            value_mode="copy_update",
+        )
+    )
     traces = model.solve_variable_reasoning_texts(math_ids, latent_reasoning_values=True)
     process_traces = model.solve_variable_reasoning_texts(
         math_ids,
@@ -778,6 +804,10 @@ def test_latent_reasoning_sequence_loss_and_decode():
     slot_digit_traces = model.solve_variable_reasoning_texts(
         math_ids,
         latent_reasoning_slot_digit_values=True,
+    )
+    copy_update_traces = model.solve_variable_reasoning_texts(
+        math_ids,
+        latent_reasoning_copy_update_values=True,
     )
 
     assert out["loss"].ndim == 0
@@ -845,6 +875,9 @@ def test_latent_reasoning_sequence_loss_and_decode():
     assert slot_digit_active.shape == (4, 17)
     assert slot_digit_ops.shape == (4, 17)
     assert slot_digit_values.shape == (4, 17, 3)
+    assert copy_update_active.shape == (4, 17)
+    assert copy_update_ops.shape == (4, 17)
+    assert copy_update_values.shape == (4, 17, 3)
     assert len(traces) == 4
     assert len(process_traces) == 4
     assert len(state_traces) == 4
@@ -853,6 +886,7 @@ def test_latent_reasoning_sequence_loss_and_decode():
     assert len(slot_class_traces) == 4
     assert len(slot_process_traces) == 4
     assert len(slot_digit_traces) == 4
+    assert len(copy_update_traces) == 4
 
 
 def test_variable_reasoner_digit_value_round_trip():
@@ -911,3 +945,4 @@ def test_latent_verifier_forward():
     logits = verifier(context, candidate_slots)
 
     assert logits.shape == (4,)
+

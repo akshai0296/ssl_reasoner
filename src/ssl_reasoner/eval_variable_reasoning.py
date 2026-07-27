@@ -120,6 +120,80 @@ def trace_step_dicts(trace: str) -> list[dict[str, int | str]]:
     return steps
 
 
+def _expression_state(expr: str) -> tuple[list[int], list[str]]:
+    parts = re.split(r"([+\-*])", expr)
+    values = [int(parts[idx]) for idx in range(0, len(parts), 2)]
+    ops = [parts[idx] for idx in range(1, len(parts), 2)]
+    return values, ops
+
+
+def _apply_trace_step(
+    values: list[int],
+    ops: list[str],
+    step: dict[str, int | str],
+) -> bool:
+    lhs = int(step["lhs"])
+    rhs = int(step["rhs"])
+    op = str(step["op"])
+    result = int(step["result"])
+    for idx, current_op in enumerate(ops):
+        if values[idx] == lhs and values[idx + 1] == rhs and current_op == op:
+            values[idx : idx + 2] = [result]
+            del ops[idx]
+            return True
+    return False
+
+
+def trace_rollout_metrics(expr: str, pred_trace: str) -> dict[str, int]:
+    target_steps = trace_step_dicts(make_reasoning_text(expr))
+    pred_steps = trace_step_dicts(pred_trace)
+    target_values, target_ops = _expression_state(expr)
+    pred_values, pred_ops = _expression_state(expr)
+    stats = {
+        "steps": len(target_steps),
+        "pred_steps": len(pred_steps),
+        "lhs": 0,
+        "rhs": 0,
+        "op": 0,
+        "operand_pair": 0,
+        "slot_triple": 0,
+        "result": 0,
+        "arithmetic_valid": 0,
+        "post_state": 0,
+    }
+    for target_step, pred_step in zip(target_steps, pred_steps):
+        lhs_ok = pred_step["lhs"] == target_step["lhs"]
+        rhs_ok = pred_step["rhs"] == target_step["rhs"]
+        op_ok = pred_step["op"] == target_step["op"]
+        result_ok = pred_step["result"] == target_step["result"]
+        stats["lhs"] += int(lhs_ok)
+        stats["rhs"] += int(rhs_ok)
+        stats["op"] += int(op_ok)
+        stats["operand_pair"] += int(lhs_ok and rhs_ok)
+        stats["slot_triple"] += int(lhs_ok and rhs_ok and op_ok)
+        stats["result"] += int(result_ok)
+        lhs = int(pred_step["lhs"])
+        rhs = int(pred_step["rhs"])
+        op = str(pred_step["op"])
+        result = int(pred_step["result"])
+        expected = (
+            lhs + rhs
+            if op == "+"
+            else lhs - rhs
+            if op == "-"
+            else lhs * rhs
+            if op == "*"
+            else None
+        )
+        stats["arithmetic_valid"] += int(expected == result)
+        _apply_trace_step(target_values, target_ops, target_step)
+        pred_applied = _apply_trace_step(pred_values, pred_ops, pred_step)
+        stats["post_state"] += int(
+            pred_applied and pred_values == target_values and pred_ops == target_ops
+        )
+    return stats
+
+
 def make_eval_example(expr: str, rng: random.Random, split_label: str) -> MathExample:
     template = rng.choice(
         [
@@ -199,6 +273,16 @@ def evaluate_preset(
     learned_step_value_correct = 0
     learned_step_value_total = 0
     learned_final_value_correct = 0
+    copy_update_lhs_correct = 0
+    copy_update_rhs_correct = 0
+    copy_update_op_correct = 0
+    copy_update_operand_pair_correct = 0
+    copy_update_slot_triple_correct = 0
+    copy_update_result_correct = 0
+    copy_update_arithmetic_valid = 0
+    copy_update_post_state_correct = 0
+    copy_update_step_total = 0
+    copy_update_pred_step_total = 0
     shown = 0
     learned_traces: list[str] | None = None
     if (
@@ -221,6 +305,7 @@ def evaluate_preset(
         or args.latent_reasoning_slot_class_values
         or args.latent_reasoning_slot_process_values
         or args.latent_reasoning_slot_digit_values
+        or args.latent_reasoning_copy_update_values
     ):
         max_math_len = train_args.get("max_math_len", 8)
         all_math_ids = torch.tensor(
@@ -261,6 +346,9 @@ def evaluate_preset(
                     latent_reasoning_slot_digit_values=(
                         args.latent_reasoning_slot_digit_values
                     ),
+                    latent_reasoning_copy_update_values=(
+                        args.latent_reasoning_copy_update_values
+                    ),
                 )
             )
 
@@ -293,6 +381,18 @@ def evaluate_preset(
                     for pred, expected in zip(pred_values, expected_values)
                 )
             learned_final_value_correct += int(trace_final_value(pred_trace) == int(example.answer))
+        if args.latent_reasoning_copy_update_values:
+            rollout = trace_rollout_metrics(expr, pred_trace)
+            copy_update_lhs_correct += rollout["lhs"]
+            copy_update_rhs_correct += rollout["rhs"]
+            copy_update_op_correct += rollout["op"]
+            copy_update_operand_pair_correct += rollout["operand_pair"]
+            copy_update_slot_triple_correct += rollout["slot_triple"]
+            copy_update_result_correct += rollout["result"]
+            copy_update_arithmetic_valid += rollout["arithmetic_valid"]
+            copy_update_post_state_correct += rollout["post_state"]
+            copy_update_step_total += rollout["steps"]
+            copy_update_pred_step_total += rollout["pred_steps"]
         if (not answer_ok or not trace_equiv_ok) and shown < args.dump_errors:
             print(
                 f"bad: {example.problem} -> answer={pred_answer!r}/{example.answer!r} "
@@ -319,6 +419,53 @@ def evaluate_preset(
             f"variable_reasoning_learned_final_value_exact="
             f"{learned_final_value_correct / total:.3f} "
             f"({learned_final_value_correct}/{total})"
+        )
+    if args.latent_reasoning_copy_update_values:
+        step_total = max(copy_update_step_total, 1)
+        print(
+            f"copy_update_step_count_ratio="
+            f"{copy_update_pred_step_total / step_total:.3f} "
+            f"({copy_update_pred_step_total}/{copy_update_step_total})"
+        )
+        print(
+            f"copy_update_lhs_exact="
+            f"{copy_update_lhs_correct / step_total:.3f} "
+            f"({copy_update_lhs_correct}/{copy_update_step_total})"
+        )
+        print(
+            f"copy_update_rhs_exact="
+            f"{copy_update_rhs_correct / step_total:.3f} "
+            f"({copy_update_rhs_correct}/{copy_update_step_total})"
+        )
+        print(
+            f"copy_update_op_exact="
+            f"{copy_update_op_correct / step_total:.3f} "
+            f"({copy_update_op_correct}/{copy_update_step_total})"
+        )
+        print(
+            f"copy_update_operand_pair_exact="
+            f"{copy_update_operand_pair_correct / step_total:.3f} "
+            f"({copy_update_operand_pair_correct}/{copy_update_step_total})"
+        )
+        print(
+            f"copy_update_slot_triple_exact="
+            f"{copy_update_slot_triple_correct / step_total:.3f} "
+            f"({copy_update_slot_triple_correct}/{copy_update_step_total})"
+        )
+        print(
+            f"copy_update_result_exact="
+            f"{copy_update_result_correct / step_total:.3f} "
+            f"({copy_update_result_correct}/{copy_update_step_total})"
+        )
+        print(
+            f"copy_update_arithmetic_valid="
+            f"{copy_update_arithmetic_valid / step_total:.3f} "
+            f"({copy_update_arithmetic_valid}/{copy_update_step_total})"
+        )
+        print(
+            f"copy_update_post_state_exact="
+            f"{copy_update_post_state_correct / step_total:.3f} "
+            f"({copy_update_post_state_correct}/{copy_update_step_total})"
         )
 
 
@@ -356,6 +503,7 @@ def evaluate_problem(
         latent_reasoning_slot_class_values=args.latent_reasoning_slot_class_values,
         latent_reasoning_slot_process_values=args.latent_reasoning_slot_process_values,
         latent_reasoning_slot_digit_values=args.latent_reasoning_slot_digit_values,
+        latent_reasoning_copy_update_values=args.latent_reasoning_copy_update_values,
     )
     pred_trace = traces[0]
     final = trace_final_value(pred_trace)
@@ -412,6 +560,7 @@ def main() -> None:
     parser.add_argument("--latent-reasoning-slot-class-values", action="store_true")
     parser.add_argument("--latent-reasoning-slot-process-values", action="store_true")
     parser.add_argument("--latent-reasoning-slot-digit-values", action="store_true")
+    parser.add_argument("--latent-reasoning-copy-update-values", action="store_true")
     parser.add_argument("--unconstrained", action="store_true")
     args = parser.parse_args()
 

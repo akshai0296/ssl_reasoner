@@ -604,6 +604,12 @@ def run_stage(
                     predicted_slot_digit_weight=args.predicted_slot_digit_weight,
                     slot_digit_carry_weight=args.slot_digit_carry_weight,
                     predicted_slot_digit_carry_weight=args.predicted_slot_digit_carry_weight,
+                    copy_update_state_weight=args.copy_update_state_weight,
+                    copy_update_slot_weight=args.copy_update_slot_weight,
+                    copy_update_result_weight=args.copy_update_result_weight,
+                    copy_update_predicted_result_weight=(
+                        args.copy_update_predicted_result_weight
+                    ),
                 )
             elif name == "standalone_transition":
                 out = model.standalone_transition_loss(
@@ -1064,6 +1070,30 @@ def main() -> None:
         type=float,
         default=0.5,
         help="Predicted-slot digit carry loss weight for latent reasoning.",
+    )
+    parser.add_argument(
+        "--copy-update-state-weight",
+        type=float,
+        default=1.0,
+        help="Weight multiplier for state identity losses used by copy/update rollout.",
+    )
+    parser.add_argument(
+        "--copy-update-slot-weight",
+        type=float,
+        default=1.0,
+        help="Weight multiplier for lhs/rhs/op slot-selection losses.",
+    )
+    parser.add_argument(
+        "--copy-update-result-weight",
+        type=float,
+        default=1.0,
+        help="Weight multiplier for teacher-forced selected-result losses.",
+    )
+    parser.add_argument(
+        "--copy-update-predicted-result-weight",
+        type=float,
+        default=1.0,
+        help="Weight multiplier for predicted-slot selected-result loss.",
     )
     parser.add_argument(
         "--stages",

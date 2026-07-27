@@ -247,6 +247,11 @@ PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
   --checkpoint checkpoints/latent_reasoning_sequence_predslot_transition_smoke/best.pt \
   --latent-reasoning-slot-process-values \
   --preset in_dist
+
+PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
+  --checkpoint checkpoints/latent_reasoning_sequence_predslot_transition_smoke/best.pt \
+  --latent-reasoning-copy-update-values \
+  --preset in_dist
 ```
 
 ## Current Results
@@ -718,6 +723,7 @@ result-decoding problem:
 | `--latent-reasoning-slot-class-values` | selected `lhs`, `rhs`, and `op` slots | bounded class value head |
 | `--latent-reasoning-slot-process-values` | selected `lhs`, `rhs`, and `op` slots | process-conditioned value head |
 | `--latent-reasoning-slot-digit-values` | selected `lhs`, `rhs`, and `op` slots | sign/digit/carry result head |
+| `--latent-reasoning-copy-update-values` | rolled copy/update state with selected slots | selected-operand transition head |
 
 Public 200-sample eval for the same checkpoint:
 
@@ -924,6 +930,28 @@ The model reports both oracle and predicted copy/update metrics:
 | direct decoded state value accuracy | `0.060` |
 | copy/update value improvement | `+0.173` |
 
+The copy/update rule is also exposed as a rollout inference mode:
+
+```bash
+PYTHONPATH=src python -m ssl_reasoner.eval_variable_reasoning \
+  --checkpoint checkpoints/latent_reasoning_sequence_predslot_transition_smoke/best.pt \
+  --latent-reasoning-copy-update-values \
+  --preset all
+```
+
+This prints copy/update-specific diagnostics:
+
+```text
+copy_update_lhs_exact
+copy_update_rhs_exact
+copy_update_op_exact
+copy_update_operand_pair_exact
+copy_update_slot_triple_exact
+copy_update_result_exact
+copy_update_arithmetic_valid
+copy_update_post_state_exact
+```
+
 Interpretation: the structural update rule works exactly when given correct slots and
 results, and even with predicted slots/results it preserves state values much better
 than direct state decoding. The remaining issue is now sharply isolated: improve the
@@ -947,6 +975,13 @@ Train the latent reasoning sequence:
 
 ```bash
 bash scripts/train_latent_reasoning_sequence.sh
+```
+
+Fine-tune the latent reasoning sequence with copy/update rollout-focused loss weights:
+
+```bash
+CHECKPOINT=checkpoints/latent_reasoning_sequence_predslot_transition_smoke/best.pt \
+  bash scripts/train_copy_update_rollout.sh
 ```
 
 Train standalone transition on reduction states:
