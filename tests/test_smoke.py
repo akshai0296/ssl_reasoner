@@ -17,7 +17,12 @@ from ssl_reasoner.data import (
     safe_eval_expression,
 )
 from ssl_reasoner.diagnostics import latent_health
-from ssl_reasoner.eval_variable_reasoning import trace_final_value, trace_is_equivalent
+from ssl_reasoner.eval_variable_reasoning import (
+    evaluate_plan_order,
+    trace_final_value,
+    trace_is_equivalent,
+    trace_rollout_metrics,
+)
 from ssl_reasoner.model import LatentVerifier, MathJEPAReadout
 from ssl_reasoner.solver import solve_problem_texts, trace_final_value_index
 from ssl_reasoner.tokenizer import build_math_tokenizer
@@ -208,6 +213,22 @@ def test_variable_trace_equivalence_accepts_valid_alternate_orders():
     )
     assert trace_final_value("3*4=12,2+12=14,14-1=13,13") == 13
     assert trace_final_value("") is None
+
+
+def test_trace_rollout_metrics_break_down_copy_update_errors():
+    good = trace_rollout_metrics("2+3*4-1", "3*4=12,2+12=14,14-1=13,13")
+    assert good["steps"] == 3
+    assert good["lhs"] == 3
+    assert good["rhs"] == 3
+    assert good["op"] == 3
+    assert good["result"] == 3
+    assert good["post_state"] == 3
+
+    bad_result = trace_rollout_metrics("2+3*4-1", "3*4=11,2+11=13,13-1=12,12")
+    assert bad_result["slot_triple"] == 1
+    assert bad_result["result"] == 0
+    assert bad_result["arithmetic_valid"] == 2
+    assert bad_result["post_state"] == 0
 
 
 def test_multi_step_balanced_curriculum_includes_ood_variants():
@@ -750,6 +771,12 @@ def test_latent_reasoning_sequence_loss_and_decode():
             value_mode="slot_digit",
         )
     )
+    copy_update_active, copy_update_ops, copy_update_values = (
+        model.latent_reasoning_sequence.predict_structured(
+            math_ids,
+            value_mode="copy_update",
+        )
+    )
     traces = model.solve_variable_reasoning_texts(math_ids, latent_reasoning_values=True)
     process_traces = model.solve_variable_reasoning_texts(
         math_ids,
@@ -778,6 +805,10 @@ def test_latent_reasoning_sequence_loss_and_decode():
     slot_digit_traces = model.solve_variable_reasoning_texts(
         math_ids,
         latent_reasoning_slot_digit_values=True,
+    )
+    copy_update_traces = model.solve_variable_reasoning_texts(
+        math_ids,
+        latent_reasoning_copy_update_values=True,
     )
 
     assert out["loss"].ndim == 0
@@ -845,6 +876,9 @@ def test_latent_reasoning_sequence_loss_and_decode():
     assert slot_digit_active.shape == (4, 17)
     assert slot_digit_ops.shape == (4, 17)
     assert slot_digit_values.shape == (4, 17, 3)
+    assert copy_update_active.shape == (4, 17)
+    assert copy_update_ops.shape == (4, 17)
+    assert copy_update_values.shape == (4, 17, 3)
     assert len(traces) == 4
     assert len(process_traces) == 4
     assert len(state_traces) == 4
@@ -853,6 +887,7 @@ def test_latent_reasoning_sequence_loss_and_decode():
     assert len(slot_class_traces) == 4
     assert len(slot_process_traces) == 4
     assert len(slot_digit_traces) == 4
+    assert len(copy_update_traces) == 4
 
 
 def test_variable_reasoner_digit_value_round_trip():
@@ -911,3 +946,98 @@ def test_latent_verifier_forward():
     logits = verifier(context, candidate_slots)
 
     assert logits.shape == (4,)
+
+
+def test_hjepa_plan_predictor_shapes():
+    tokenizer = build_math_tokenizer()
+    model = MathJEPAReadout(
+        vocab_size=tokenizer.vocab_size,
+        max_variable_steps=4,
+        use_math_features=True,
+    )
+    dataset = MathDataset(
+        generate_math_examples(4, seed=11, curriculum="mixed_only"),
+        tokenizer,
+        max_variable_steps=4,
+    )
+    math_ids = torch.stack([dataset[i]["math_ids"] for i in range(4)])
+
+    plan_latent, op_logits, active_logits = model.hjepa_reasoner(math_ids)
+
+    d_model = plan_latent.size(-1)
+    assert plan_latent.shape == (4, d_model)
+    # Plan latent is L2-normalized.
+    assert torch.allclose(plan_latent.norm(dim=-1), torch.ones(4), atol=1e-4)
+    assert op_logits.shape == (4, 4, 4)  # batch, steps, ops
+    assert active_logits.shape == (4, 4)
+
+
+def test_hjepa_loss_forward_and_grads():
+    tokenizer = build_math_tokenizer()
+    model = MathJEPAReadout(
+        vocab_size=tokenizer.vocab_size,
+        max_variable_steps=4,
+        use_math_features=True,
+    )
+    dataset = MathDataset(
+        generate_math_examples(4, seed=11, curriculum="mixed_only"),
+        tokenizer,
+        max_variable_steps=4,
+    )
+    batch = [dataset[i] for i in range(4)]
+    math_ids = torch.stack([item["math_ids"] for item in batch])
+    op_ids = torch.stack([item["variable_trace_op_ids"] for item in batch])
+    position_ids = torch.stack([item["variable_trace_position_ids"] for item in batch])
+    values = torch.stack([item["variable_trace_values"] for item in batch])
+    step_mask = torch.stack([item["variable_trace_mask"] for item in batch])
+
+    # The plan level must not re-register the wrapped L1 parameters.
+    l1_ids = {id(p) for p in model.latent_reasoning_sequence.parameters()}
+    plan_ids = {id(p) for p in model.hjepa_reasoner.parameters()}
+    assert plan_ids and not (l1_ids & plan_ids)
+
+    out = model.hjepa_loss(math_ids, op_ids, position_ids, values, step_mask)
+
+    assert out["loss"].ndim == 0
+    for key in (
+        "hjepa_plan_loss",
+        "hjepa_plan_latent_loss",
+        "hjepa_plan_contrastive_loss",
+        "hjepa_plan_op_loss",
+        "hjepa_plan_active_loss",
+        "hjepa_plan_cosine",
+        "hjepa_plan_op_acc",
+        "hjepa_plan_active_acc",
+    ):
+        assert out[key].ndim == 0
+    # Delegation preserves the wrapped L1 metrics.
+    assert "latent_reasoning_final_acc" in out
+
+    out["loss"].backward()
+    assert any(
+        p.grad is not None and p.grad.abs().sum() > 0
+        for p in model.hjepa_reasoner.plan_predictor.parameters()
+    )
+
+
+def test_hjepa_plan_order_metrics():
+    tokenizer = build_math_tokenizer()
+    model = MathJEPAReadout(
+        vocab_size=tokenizer.vocab_size,
+        max_variable_steps=4,
+        use_math_features=True,
+    )
+    examples = generate_math_examples(6, seed=5, curriculum="mixed_only")
+    stats = evaluate_plan_order(
+        model,
+        examples,
+        {"max_math_len": 8, "max_variable_steps": 4},
+        torch.device("cpu"),
+        batch_size=4,
+    )
+    for key in (
+        "plan_order_op_step_exact",
+        "plan_order_length_exact",
+        "plan_order_sequence_exact",
+    ):
+        assert 0.0 <= stats[key] <= 1.0
