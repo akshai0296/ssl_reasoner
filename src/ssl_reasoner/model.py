@@ -1435,7 +1435,11 @@ class LatentReasoningSequencePredictor(nn.Module):
             nn.LayerNorm(d_model),
         )
 
-    def forward(self, math_ids: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        math_ids: torch.Tensor,
+        plan_latent: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         batch = math_ids.size(0)
         math_tokens = self.token_embed(math_ids) + self.math_pos_embed[:, : math_ids.size(1)]
         query_tokens = self.query_embed.expand(batch, -1, -1).clone()
@@ -1446,6 +1450,9 @@ class LatentReasoningSequencePredictor(nn.Module):
         )
         kind_ids[-1] = 1
         query_tokens = query_tokens + self.kind_embed(kind_ids).unsqueeze(0)
+        if plan_latent is not None:
+            # H-JEPA top-down conditioning: the L2 plan biases every step query.
+            query_tokens = query_tokens + plan_latent.unsqueeze(1)
         tokens = torch.cat([math_tokens, query_tokens], dim=1)
         math_mask = math_ids.ne(0)
         query_mask = torch.ones(
@@ -2252,10 +2259,11 @@ class LatentReasoningSequence(nn.Module):
         copy_update_slot_weight: float = 1.0,
         copy_update_result_weight: float = 1.0,
         copy_update_predicted_result_weight: float = 1.0,
+        plan_latent: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         all_ops, all_values, all_mask, kind_ids = self._targets(op_ids, values, step_mask)
         target = self.target_encoder(all_ops, all_values, kind_ids).detach()
-        pred = self.predictor(math_ids)
+        pred = self.predictor(math_ids, plan_latent=plan_latent)
         per_state = F.smooth_l1_loss(pred, target, reduction="none").mean(dim=-1)
         latent_loss = (per_state * all_mask).sum() / all_mask.sum().clamp(min=1.0)
         cosine = (pred * target).sum(dim=-1)
@@ -3295,8 +3303,9 @@ class LatentReasoningSequence(nn.Module):
         self,
         math_ids: torch.Tensor,
         value_mode: str = "class",
+        plan_latent: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        pred = self.predictor(math_ids)
+        pred = self.predictor(math_ids, plan_latent=plan_latent)
         (
             active_logits,
             op_logits,
@@ -3660,6 +3669,17 @@ class MathJEPAReadout(nn.Module):
             math_vocab_size, d_model, max_math_len, max_steps=max_variable_steps
         )
         self.latent_reasoning_sequence = LatentReasoningSequence(
+            math_vocab_size,
+            d_model,
+            max_math_len,
+            max_steps=max_variable_steps,
+            num_heads=num_heads,
+        )
+        # Deferred import keeps model.py free of an import cycle with hjepa.py.
+        from .hjepa import HJEPAReasoner
+
+        self.hjepa_reasoner = HJEPAReasoner(
+            self.latent_reasoning_sequence,
             math_vocab_size,
             d_model,
             max_math_len,
@@ -4094,6 +4114,32 @@ class MathJEPAReadout(nn.Module):
             copy_update_slot_weight=copy_update_slot_weight,
             copy_update_result_weight=copy_update_result_weight,
             copy_update_predicted_result_weight=copy_update_predicted_result_weight,
+        )
+
+    def hjepa_loss(
+        self,
+        math_ids: torch.Tensor,
+        variable_trace_op_ids: torch.Tensor,
+        variable_trace_position_ids: torch.Tensor,
+        variable_trace_values: torch.Tensor,
+        variable_trace_mask: torch.Tensor,
+        plan_weight: float = 1.0,
+        plan_contrastive_weight: float = 0.5,
+        plan_op_weight: float = 1.0,
+        plan_active_weight: float = 0.5,
+        l1_kwargs: dict | None = None,
+    ) -> dict[str, torch.Tensor]:
+        return self.hjepa_reasoner.loss(
+            math_ids,
+            variable_trace_op_ids,
+            variable_trace_position_ids,
+            variable_trace_values,
+            variable_trace_mask,
+            plan_weight=plan_weight,
+            plan_contrastive_weight=plan_contrastive_weight,
+            plan_op_weight=plan_op_weight,
+            plan_active_weight=plan_active_weight,
+            l1_kwargs=l1_kwargs,
         )
 
     def standalone_transition_loss(
@@ -4945,8 +4991,9 @@ class MathJEPAReadout(nn.Module):
         latent_reasoning_slot_process_values: bool = False,
         latent_reasoning_slot_digit_values: bool = False,
         latent_reasoning_copy_update_values: bool = False,
+        hjepa_values: bool = False,
     ) -> list[str]:
-        if (
+        base_latent_selected = (
             latent_reasoning_values
             or latent_reasoning_digit_values
             or latent_reasoning_process_values
@@ -4957,7 +5004,8 @@ class MathJEPAReadout(nn.Module):
             or latent_reasoning_slot_process_values
             or latent_reasoning_slot_digit_values
             or latent_reasoning_copy_update_values
-        ):
+        )
+        if base_latent_selected or hjepa_values:
             value_mode = (
                 "copy_update"
                 if latent_reasoning_copy_update_values
@@ -4986,9 +5034,17 @@ class MathJEPAReadout(nn.Module):
                 if latent_reasoning_digit_values
                 else "class"
             )
+            # H-JEPA: condition the L1 decode on the predicted plan latent. With no
+            # base decode flag, default to the strongest structured numeric path.
+            if hjepa_values and not base_latent_selected:
+                value_mode = "slot_digit"
+            plan_latent = (
+                self.hjepa_reasoner.plan_conditioning(math_ids) if hjepa_values else None
+            )
             active, op_ids, values = self.latent_reasoning_sequence.predict_structured(
                 math_ids,
                 value_mode=value_mode,
+                plan_latent=plan_latent,
             )
             active_rows = active.detach().cpu().tolist()
             op_rows = op_ids.detach().cpu().tolist()

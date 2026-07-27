@@ -257,6 +257,66 @@ def generate_ood_examples(samples: int, seed: int, preset: str) -> list[MathExam
     return examples
 
 
+def evaluate_plan_order(
+    model,
+    examples: list[MathExample],
+    train_args: dict,
+    device: torch.device,
+    batch_size: int,
+) -> dict[str, float]:
+    """Score the H-JEPA plan level on reduction *order*, ignoring numeric values.
+
+    Isolates "did the plan pick the right operator sequence and trace length" from
+    the separate, harder problem of computing exact intermediate values. A high
+    plan-order score on the long presets is the signal that the hierarchy generalizes
+    even when the numeric decode does not.
+    """
+    max_math_len = train_args.get("max_math_len", 8)
+    max_steps = train_args.get("max_variable_steps", 4)
+    all_math_ids = torch.tensor(
+        [encode_math_features(example.problem, max_math_len) for example in examples],
+        dtype=torch.long,
+        device=device,
+    )
+    pred_ops_chunks = []
+    pred_active_chunks = []
+    with torch.no_grad():
+        for start in range(0, len(examples), batch_size):
+            batch_math_ids = all_math_ids[start : start + batch_size]
+            _, op_logits, active_logits = model.hjepa_reasoner(batch_math_ids)
+            pred_ops_chunks.append(op_logits.argmax(dim=-1).cpu())
+            pred_active_chunks.append((active_logits.sigmoid() >= 0.5).cpu())
+    pred_ops = torch.cat(pred_ops_chunks, dim=0)
+    pred_active = torch.cat(pred_active_chunks, dim=0)
+
+    op_step_correct = 0
+    op_step_total = 0
+    length_exact = 0
+    sequence_exact = 0
+    for idx, example in enumerate(examples):
+        expr = extract_math_expression(example.problem)
+        target_op_ids, _, _, _, target_mask = make_variable_trace_fields(
+            expr, max_steps=max_steps
+        )
+        target_ops = torch.tensor(target_op_ids)
+        active = torch.tensor(target_mask).bool()
+        row_ops = pred_ops[idx][: active.numel()]
+        row_active = pred_active[idx][: active.numel()]
+        op_matches = row_ops[active] == target_ops[active]
+        op_step_correct += int(op_matches.sum().item())
+        op_step_total += int(active.sum().item())
+        length_ok = bool((row_active == active).all().item())
+        length_exact += int(length_ok)
+        sequence_exact += int(length_ok and bool(op_matches.all().item()))
+
+    total = max(len(examples), 1)
+    return {
+        "plan_order_op_step_exact": op_step_correct / max(op_step_total, 1),
+        "plan_order_length_exact": length_exact / total,
+        "plan_order_sequence_exact": sequence_exact / total,
+    }
+
+
 def evaluate_preset(
     args: argparse.Namespace,
     model,
@@ -306,6 +366,7 @@ def evaluate_preset(
         or args.latent_reasoning_slot_process_values
         or args.latent_reasoning_slot_digit_values
         or args.latent_reasoning_copy_update_values
+        or args.hjepa_values
     ):
         max_math_len = train_args.get("max_math_len", 8)
         all_math_ids = torch.tensor(
@@ -349,6 +410,7 @@ def evaluate_preset(
                     latent_reasoning_copy_update_values=(
                         args.latent_reasoning_copy_update_values
                     ),
+                    hjepa_values=args.hjepa_values,
                 )
             )
 
@@ -408,6 +470,15 @@ def evaluate_preset(
         f"variable_reasoning_trace_equiv_exact="
         f"{trace_equiv_correct / total:.3f} ({trace_equiv_correct}/{total})"
     )
+    if args.hjepa_plan_order:
+        plan_stats = evaluate_plan_order(
+            model, examples, train_args, device, args.batch_size
+        )
+        print(
+            f"plan_order_op_step_exact={plan_stats['plan_order_op_step_exact']:.3f} "
+            f"plan_order_length_exact={plan_stats['plan_order_length_exact']:.3f} "
+            f"plan_order_sequence_exact={plan_stats['plan_order_sequence_exact']:.3f}"
+        )
     if args.learned_values:
         value_total = max(learned_step_value_total, 1)
         print(
@@ -504,6 +575,7 @@ def evaluate_problem(
         latent_reasoning_slot_process_values=args.latent_reasoning_slot_process_values,
         latent_reasoning_slot_digit_values=args.latent_reasoning_slot_digit_values,
         latent_reasoning_copy_update_values=args.latent_reasoning_copy_update_values,
+        hjepa_values=args.hjepa_values,
     )
     pred_trace = traces[0]
     final = trace_final_value(pred_trace)
@@ -561,6 +633,17 @@ def main() -> None:
     parser.add_argument("--latent-reasoning-slot-process-values", action="store_true")
     parser.add_argument("--latent-reasoning-slot-digit-values", action="store_true")
     parser.add_argument("--latent-reasoning-copy-update-values", action="store_true")
+    parser.add_argument(
+        "--hjepa-values",
+        action="store_true",
+        help="Condition the latent reasoning decode on the predicted H-JEPA plan latent.",
+    )
+    parser.add_argument(
+        "--hjepa-plan-order",
+        action="store_true",
+        help="Report plan-order accuracy (operator sequence + trace length), "
+        "ignoring numeric values.",
+    )
     parser.add_argument("--unconstrained", action="store_true")
     args = parser.parse_args()
 

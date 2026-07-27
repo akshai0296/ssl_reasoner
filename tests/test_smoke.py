@@ -18,6 +18,7 @@ from ssl_reasoner.data import (
 )
 from ssl_reasoner.diagnostics import latent_health
 from ssl_reasoner.eval_variable_reasoning import (
+    evaluate_plan_order,
     trace_final_value,
     trace_is_equivalent,
     trace_rollout_metrics,
@@ -946,3 +947,97 @@ def test_latent_verifier_forward():
 
     assert logits.shape == (4,)
 
+
+def test_hjepa_plan_predictor_shapes():
+    tokenizer = build_math_tokenizer()
+    model = MathJEPAReadout(
+        vocab_size=tokenizer.vocab_size,
+        max_variable_steps=4,
+        use_math_features=True,
+    )
+    dataset = MathDataset(
+        generate_math_examples(4, seed=11, curriculum="mixed_only"),
+        tokenizer,
+        max_variable_steps=4,
+    )
+    math_ids = torch.stack([dataset[i]["math_ids"] for i in range(4)])
+
+    plan_latent, op_logits, active_logits = model.hjepa_reasoner(math_ids)
+
+    d_model = plan_latent.size(-1)
+    assert plan_latent.shape == (4, d_model)
+    # Plan latent is L2-normalized.
+    assert torch.allclose(plan_latent.norm(dim=-1), torch.ones(4), atol=1e-4)
+    assert op_logits.shape == (4, 4, 4)  # batch, steps, ops
+    assert active_logits.shape == (4, 4)
+
+
+def test_hjepa_loss_forward_and_grads():
+    tokenizer = build_math_tokenizer()
+    model = MathJEPAReadout(
+        vocab_size=tokenizer.vocab_size,
+        max_variable_steps=4,
+        use_math_features=True,
+    )
+    dataset = MathDataset(
+        generate_math_examples(4, seed=11, curriculum="mixed_only"),
+        tokenizer,
+        max_variable_steps=4,
+    )
+    batch = [dataset[i] for i in range(4)]
+    math_ids = torch.stack([item["math_ids"] for item in batch])
+    op_ids = torch.stack([item["variable_trace_op_ids"] for item in batch])
+    position_ids = torch.stack([item["variable_trace_position_ids"] for item in batch])
+    values = torch.stack([item["variable_trace_values"] for item in batch])
+    step_mask = torch.stack([item["variable_trace_mask"] for item in batch])
+
+    # The plan level must not re-register the wrapped L1 parameters.
+    l1_ids = {id(p) for p in model.latent_reasoning_sequence.parameters()}
+    plan_ids = {id(p) for p in model.hjepa_reasoner.parameters()}
+    assert plan_ids and not (l1_ids & plan_ids)
+
+    out = model.hjepa_loss(math_ids, op_ids, position_ids, values, step_mask)
+
+    assert out["loss"].ndim == 0
+    for key in (
+        "hjepa_plan_loss",
+        "hjepa_plan_latent_loss",
+        "hjepa_plan_contrastive_loss",
+        "hjepa_plan_op_loss",
+        "hjepa_plan_active_loss",
+        "hjepa_plan_cosine",
+        "hjepa_plan_op_acc",
+        "hjepa_plan_active_acc",
+    ):
+        assert out[key].ndim == 0
+    # Delegation preserves the wrapped L1 metrics.
+    assert "latent_reasoning_final_acc" in out
+
+    out["loss"].backward()
+    assert any(
+        p.grad is not None and p.grad.abs().sum() > 0
+        for p in model.hjepa_reasoner.plan_predictor.parameters()
+    )
+
+
+def test_hjepa_plan_order_metrics():
+    tokenizer = build_math_tokenizer()
+    model = MathJEPAReadout(
+        vocab_size=tokenizer.vocab_size,
+        max_variable_steps=4,
+        use_math_features=True,
+    )
+    examples = generate_math_examples(6, seed=5, curriculum="mixed_only")
+    stats = evaluate_plan_order(
+        model,
+        examples,
+        {"max_math_len": 8, "max_variable_steps": 4},
+        torch.device("cpu"),
+        batch_size=4,
+    )
+    for key in (
+        "plan_order_op_step_exact",
+        "plan_order_length_exact",
+        "plan_order_sequence_exact",
+    ):
+        assert 0.0 <= stats[key] <= 1.0

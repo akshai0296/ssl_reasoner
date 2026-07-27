@@ -611,6 +611,32 @@ def run_stage(
                         args.copy_update_predicted_result_weight
                     ),
                 )
+            elif name == "hjepa":
+                out = model.hjepa_loss(
+                    math_ids,
+                    variable_trace_op_ids,
+                    variable_trace_position_ids,
+                    variable_trace_values,
+                    variable_trace_mask,
+                    plan_weight=args.hjepa_plan_weight,
+                    plan_contrastive_weight=args.hjepa_plan_contrastive_weight,
+                    plan_op_weight=args.hjepa_plan_op_weight,
+                    plan_active_weight=args.hjepa_plan_active_weight,
+                    l1_kwargs=dict(
+                        slot_digit_weight=args.slot_digit_weight,
+                        predicted_slot_digit_weight=args.predicted_slot_digit_weight,
+                        slot_digit_carry_weight=args.slot_digit_carry_weight,
+                        predicted_slot_digit_carry_weight=(
+                            args.predicted_slot_digit_carry_weight
+                        ),
+                        copy_update_state_weight=args.copy_update_state_weight,
+                        copy_update_slot_weight=args.copy_update_slot_weight,
+                        copy_update_result_weight=args.copy_update_result_weight,
+                        copy_update_predicted_result_weight=(
+                            args.copy_update_predicted_result_weight
+                        ),
+                    ),
+                )
             elif name == "standalone_transition":
                 out = model.standalone_transition_loss(
                     variable_trace_op_ids,
@@ -814,6 +840,9 @@ def run_stage(
                         "latent_reasoning_predicted_copy_update_op_mask_acc",
                         "latent_reasoning_copy_update_value_acc",
                         "latent_reasoning_copy_update_value_improvement",
+                        "hjepa_plan_cosine",
+                        "hjepa_plan_op_acc",
+                        "hjepa_plan_active_acc",
                     }
                 )
                 print(
@@ -859,6 +888,7 @@ def run_stage(
                     "variable_class_value_head",
                     "latent_reasoning_sequence",
                     "latent_reasoning_slot_digit_head",
+                    "hjepa",
                     "standalone_transition",
                     "state_conditioned_latent",
                     "state_conditioned_joint",
@@ -932,7 +962,11 @@ def run_stage(
                             ),
                         ).item()
                     )
-                    if name in {"latent_reasoning_sequence", "latent_reasoning_slot_digit_head"}
+                    if name in {
+                        "latent_reasoning_sequence",
+                        "latent_reasoning_slot_digit_head",
+                        "hjepa",
+                    }
                     else variable_unconstrained_trace_acc
                     + 0.001 * float(out.get("variable_class_value_acc", torch.tensor(0.0)).item())
                     if name == "variable_class_value_head"
@@ -1095,6 +1129,31 @@ def main() -> None:
         default=1.0,
         help="Weight multiplier for predicted-slot selected-result loss.",
     )
+    parser.add_argument("--hjepa-steps", type=int, default=None)
+    parser.add_argument(
+        "--hjepa-plan-weight",
+        type=float,
+        default=1.0,
+        help="Weight for the L2 plan-latent matching loss.",
+    )
+    parser.add_argument(
+        "--hjepa-plan-contrastive-weight",
+        type=float,
+        default=0.5,
+        help="Weight for the L2 plan InfoNCE loss.",
+    )
+    parser.add_argument(
+        "--hjepa-plan-op-weight",
+        type=float,
+        default=1.0,
+        help="Weight for the L2 plan per-step operator decode loss.",
+    )
+    parser.add_argument(
+        "--hjepa-plan-active-weight",
+        type=float,
+        default=0.5,
+        help="Weight for the L2 plan active/stop decode loss.",
+    )
     parser.add_argument(
         "--stages",
         default="0,1,2",
@@ -1128,6 +1187,7 @@ def main() -> None:
         args.state_conditioned_steps = args.state_conditioned_steps or 800
         args.reasoning_sequence_steps = args.reasoning_sequence_steps or 2000
         args.variable_reasoner_steps = args.variable_reasoner_steps or 2000
+        args.hjepa_steps = args.hjepa_steps or 2000
 
     torch.manual_seed(args.seed)
     device = _device(args.device)
@@ -1619,6 +1679,35 @@ def main() -> None:
             device=device,
             optimizer=optimizer,
             steps=args.variable_reasoner_steps,
+            batch_size=args.batch_size,
+            eval_every=args.eval_every,
+            sample_count=args.sample_count,
+            output_dir=output_dir,
+            args=args,
+            best_acc=best_acc,
+        )
+
+    if "hjepa" in requested_stages:
+        for module in model.children():
+            _set_trainable(module, False)
+        # Train the L2 plan level and let L1 adapt to the top-down conditioning.
+        _set_trainable(model.hjepa_reasoner, True)
+        _set_trainable(model.latent_reasoning_sequence, True)
+        optimizer = torch.optim.AdamW(
+            list(model.hjepa_reasoner.parameters())
+            + list(model.latent_reasoning_sequence.parameters()),
+            lr=args.lr,
+            weight_decay=0.01,
+        )
+        best_acc = run_stage(
+            name="hjepa",
+            model=model,
+            loader=loader,
+            val_dataset=val_dataset,
+            tokenizer=tokenizer,
+            device=device,
+            optimizer=optimizer,
+            steps=args.hjepa_steps,
             batch_size=args.batch_size,
             eval_every=args.eval_every,
             sample_count=args.sample_count,
